@@ -3,11 +3,18 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlSymmetryCfg,
+)
 
 from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.rough_env_cfg import (
+    GO2ARM_LOCO_STAGE_END_ITERATION,
     UnitreeGo2ArmRoughEnvCfg,
 )
+from robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry import go2arm
 
 
 def _resolve_init_noise_std(*, allow_vector: bool) -> float | tuple[float, ...]:
@@ -25,10 +32,10 @@ def _resolve_init_noise_std(*, allow_vector: bool) -> float | tuple[float, ...]:
 @configclass
 class UnitreeGo2ArmRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 5000
-    save_interval = 25
+    max_iterations = 20000
+    save_interval = 50
     experiment_name = "unitree_go2arm_rough"
-    go2arm_mani_phase_reset_iteration = 100
+    go2arm_mani_phase_reset_iteration = GO2ARM_LOCO_STAGE_END_ITERATION
     go2arm_mani_phase_reset_arm_action_indices = tuple(range(12, 18))
     go2arm_mani_phase_reset_arm_std = 0.4
     go2arm_mani_phase_reset_learning_rate = 3.0e-4
@@ -49,7 +56,7 @@ class UnitreeGo2ArmRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         clip_param=0.2,
         entropy_coef=0.002,
         num_learning_epochs=8,
-        num_mini_batches=16,
+        num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
@@ -62,10 +69,10 @@ class UnitreeGo2ArmRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 @configclass
 class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 5000
-    save_interval = 25
+    max_iterations = 20000
+    save_interval = 50
     experiment_name = "unitree_go2arm_teacher_rough"
-    go2arm_mani_phase_reset_iteration = 100
+    go2arm_mani_phase_reset_iteration = GO2ARM_LOCO_STAGE_END_ITERATION
     go2arm_mani_phase_reset_arm_action_indices = tuple(range(12, 18))
     go2arm_mani_phase_reset_arm_std = 0.4
     go2arm_mani_phase_reset_learning_rate = 3.0e-4
@@ -97,7 +104,7 @@ class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         clip_param=0.2,
         entropy_coef=0.002,
         num_learning_epochs=8,
-        num_mini_batches=16,
+        num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
@@ -113,3 +120,28 @@ class UnitreeGo2ArmFlatPPORunnerCfg(UnitreeGo2ArmTeacherRoughPPORunnerCfg):
         super().__post_init__()
         self.max_iterations = 10000
         self.experiment_name = "unitree_go2arm_teacher_flat"
+
+
+@configclass
+class UnitreeGo2ArmFlatPPORunnerWithSymmetryCfg(UnitreeGo2ArmFlatPPORunnerCfg):
+    """Flat Go2Arm PPO config with world-XZ mirror data augmentation."""
+
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.002,
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        symmetry_cfg=RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            data_augmentation_func=go2arm.compute_symmetric_states,
+        ),
+    )

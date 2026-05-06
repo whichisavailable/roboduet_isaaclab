@@ -14,111 +14,21 @@ import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
     """go2arm 额外调试日志环境。"""
 
-    _GO2ARM_TRACKING_TERMS = {
-        "gate_d",
-        "tracking_error",
-        "position_tracking_error",
-        "orientation_tracking_error",
-        "reference_tracking_error",
-        "cumulative_tracking_error",
-    }
-
-    _GO2ARM_MANI_MASKED_TERMS = {
-        "position_tracking_error",
-        "orientation_tracking_error",
-        "reference_tracking_error",
-        "cumulative_tracking_error",
-        "mani_reward",
-        "support_roll_penalty",
-        "support_feet_slide_penalty",
-        "support_foot_air_penalty",
-        "support_non_foot_contact_penalty",
-        "target_height_pitch_penalty",
-        "min_base_height_penalty",
-        "posture_deviation_penalty",
-        "joint_limit_safety_penalty",
-        "support_left_right_x_symmetry_penalty",
-        "support_left_right_y_symmetry_penalty",
-        "mani_regularization_raw",
-        "mani_regularization",
-        "ee_tracking_potential",
-        "workspace_position_penalty",
-    }
-
-    _GO2ARM_LOCO_MASKED_TERMS = {
-        "loco_reward",
-        "locomotion_tracking",
-        "moving_arm_default_deviation_penalty",
-        "moving_arm_joint_velocity_penalty",
-        "base_height_penalty",
-        "base_roll_penalty",
-        "base_pitch_penalty",
-        "base_roll_ang_vel_penalty",
-        "base_pitch_ang_vel_penalty",
-        "base_z_vel_penalty",
-        "base_lateral_vel_penalty",
-        "leg_posture_deviation_penalty",
-        "touchdown_left_right_x_symmetry_penalty",
-        "touchdown_left_right_y_symmetry_penalty",
-        "touchdown_foot_y_distance_penalty",
-        "diagonal_foot_symmetry_penalty",
-        "feet_contact_soft_trot_support_factor",
-        "feet_contact_soft_trot_weighted_gate",
-        "loco_regularization_base_raw",
-        "loco_regularization",
-    }
-
     _GO2ARM_REWARD_LOG_ORDER = [
-        "gate_d",
-        "tracking_error",
-        "position_tracking_error",
-        "orientation_tracking_error",
-        "reference_tracking_error",
-        "cumulative_tracking_error",
         "mani_reward",
         "loco_reward",
         "basic_reward",
-        "support_roll_penalty",
-        "support_feet_slide_penalty",
-        "support_foot_air_penalty",
-        "support_non_foot_contact_penalty",
-        "target_height_pitch_penalty",
-        "min_base_height_penalty",
-        "posture_deviation_penalty",
-        "joint_limit_safety_penalty",
-        "support_left_right_x_symmetry_penalty",
-        "support_left_right_y_symmetry_penalty",
-        "mani_regularization_raw",
-        "mani_regularization",
-        "ee_tracking_potential",
-        "workspace_position_penalty",
-        "locomotion_tracking",
-        "moving_arm_default_deviation_penalty",
-        "moving_arm_joint_velocity_penalty",
-        "base_height_penalty",
-        "base_roll_penalty",
-        "base_pitch_penalty",
-        "base_roll_ang_vel_penalty",
-        "base_pitch_ang_vel_penalty",
-        "base_z_vel_penalty",
-        "base_lateral_vel_penalty",
-        "leg_posture_deviation_penalty",
-        "touchdown_left_right_x_symmetry_penalty",
-        "touchdown_left_right_y_symmetry_penalty",
-        "touchdown_foot_y_distance_penalty",
-        "diagonal_foot_symmetry_penalty",
-        "feet_contact_soft_trot_support_factor",
-        "feet_contact_soft_trot_weighted_gate",
-        "loco_regularization_base_raw",
-        "loco_regularization",
-        "basic_is_alive",
-        "basic_collision_penalty",
-        "basic_action_smoothness_first",
-        "basic_action_smoothness_second",
         "basic_joint_torque_sq_penalty",
         "basic_joint_power_penalty",
-        "total_reward_debug",
     ]
+
+    _GO2ARM_REWARD_LOG_GROUPS = {
+        "mani_reward": "mani",
+        "loco_reward": "loco",
+        "basic_reward": "basic",
+        "basic_joint_torque_sq_penalty": "basic",
+        "basic_joint_power_penalty": "basic",
+    }
 
     def __init__(self, cfg, *args, **kwargs):
         super().__init__(cfg, *args, **kwargs)
@@ -173,16 +83,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         )
 
     def _reward_log_key(self, term_name: str) -> str:
-        if term_name in self._GO2ARM_TRACKING_TERMS:
-            group = "tracking"
-        elif term_name in self._GO2ARM_MANI_MASKED_TERMS:
-            group = "mani"
-        elif term_name in self._GO2ARM_LOCO_MASKED_TERMS:
-            group = "loco"
-        elif term_name.startswith("basic_"):
-            group = "basic"
-        else:
-            group = "misc"
+        group = self._GO2ARM_REWARD_LOG_GROUPS.get(term_name, "misc")
         return f"R/{group}/{term_name}"
 
     def _as_log_tensor(self, value: float | torch.Tensor) -> torch.Tensor:
@@ -229,45 +130,17 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             episode_dict[key] = mean_value
         self._accumulate_log_only(key, sum_value, count=float(valid_count))
 
-    def _command_term(self, command_name: str = "ee_pose"):
-        return self.command_manager.get_term(command_name)
-
-    def _classify_episode_bucket(
-        self, sampled_target_pos_b: torch.Tensor, target_pos_w: torch.Tensor, command_cfg
-    ) -> str:
-        x_tag = "x_near" if float(sampled_target_pos_b[0]) <= 0.5 else "x_far"
-        z_world = float(target_pos_w[2])
-        low_range = getattr(command_cfg, "secondary_world_z_range", None)
-        high_range = getattr(command_cfg, "tertiary_world_z_range", None)
-        z_tag = "z_normal"
-        if low_range is not None and float(low_range[0]) <= z_world <= float(low_range[1]):
-            z_tag = "z_low_hard"
-        elif high_range is not None and float(high_range[0]) <= z_world <= float(high_range[1]):
-            z_tag = "z_high_hard"
-        return f"{x_tag}/{z_tag}"
-
     def _accumulate_done_episode_stats(
         self,
         episode_dict: dict[str, float | torch.Tensor],
         done_mask: torch.Tensor,
         prev_episode_length_buf: torch.Tensor,
-        prev_sampled_target_pos_b: torch.Tensor,
-        prev_target_pos_w: torch.Tensor,
-        terminal_tracking_errors: dict[str, torch.Tensor] | None,
     ) -> None:
         if not torch.any(done_mask):
             return
 
         done_ids = torch.where(done_mask)[0]
         done_episode_lengths = prev_episode_length_buf[done_ids].to(torch.float32) + 1.0
-        if terminal_tracking_errors is not None:
-            for term_name, term_value in terminal_tracking_errors.items():
-                self._accumulate_tensor_mean_log(
-                    episode_dict,
-                    f"R/tracking/terminal_{term_name}",
-                    term_value[done_ids],
-                    write_episode=True,
-                )
         self._accumulate_log_only(
             "R/misc/terminal_episode_length",
             done_episode_lengths.sum().item(),
@@ -276,23 +149,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         episode_dict["R/misc/terminal_episode_length"] = done_episode_lengths.sum() / float(
             done_episode_lengths.numel()
         )
-
-        command_cfg = self.cfg.commands.ee_pose
-        bucket_to_lengths: dict[str, list[float]] = {}
-        for local_idx, env_id in enumerate(done_ids.tolist()):
-            bucket = self._classify_episode_bucket(
-                prev_sampled_target_pos_b[env_id],
-                prev_target_pos_w[env_id],
-                command_cfg,
-            )
-            bucket_to_lengths.setdefault(bucket, []).append(float(done_episode_lengths[local_idx].item()))
-
-        for bucket, lengths in bucket_to_lengths.items():
-            bucket_sum = float(sum(lengths))
-            bucket_count = float(len(lengths))
-            bucket_key = f"Len/{bucket}"
-            episode_dict[bucket_key] = self._as_log_tensor(bucket_sum / bucket_count)
-            self._accumulate_log_only(bucket_key, bucket_sum, count=bucket_count)
 
     def _filter_episode_log_dict(self, log_dict: dict[str, float | torch.Tensor]) -> dict[str, float | torch.Tensor]:
         if not log_dict or not self._episode_log_key_prefixes:
@@ -536,9 +392,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._go2arm_reward_cache_term_name = None
         self.action_manager.prev_prev_action = self.action_manager.prev_action.clone()
         prev_episode_length_buf = self.episode_length_buf.clone()
-        command_term = self._command_term("ee_pose")
-        prev_sampled_target_pos_b = getattr(command_term, "sampled_target_pos_b", command_term.target_pos_b).clone()
-        prev_target_pos_w = command_term.target_pos_w.clone()
 
         if self._debug_zero_action:
             action = torch.zeros_like(action)
@@ -556,48 +409,19 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._merge_reset_logs_into_episode(extras, episode_dict)
 
         reward_term_name = "total_reward"
-        terminal_tracking_errors = None
         if self._enable_debug_reward_logging and reward_term_name in self.reward_manager.active_terms:
             debug_terms = mdp.go2arm_reward_debug_terms(self, total_reward_term_name=reward_term_name)
-            gate = debug_terms.get("gate_d")
-            gate_low_mask = gate < 0.1 if gate is not None else None
-            gate_high_mask = gate > 0.9 if gate is not None else None
-            terminal_tracking_errors = {
-                term_name: debug_terms[term_name]
-                for term_name in (
-                    "tracking_error",
-                    "position_tracking_error",
-                    "orientation_tracking_error",
-                    "reference_tracking_error",
-                    "cumulative_tracking_error",
-                )
-                if term_name in debug_terms
-            }
 
             for name in self._GO2ARM_REWARD_LOG_ORDER:
                 if name not in debug_terms:
                     continue
                 key = self._reward_log_key(name)
-                if name == "tracking_error":
-                    continue
-                if name in self._GO2ARM_MANI_MASKED_TERMS:
-                    self._accumulate_tensor_mean_log(
-                        episode_dict, key, debug_terms[name], mask=gate_low_mask, write_episode=True
-                    )
-                elif name in self._GO2ARM_LOCO_MASKED_TERMS:
-                    self._accumulate_tensor_mean_log(
-                        episode_dict, key, debug_terms[name], mask=gate_high_mask, write_episode=True
-                    )
-                else:
-                    self._accumulate_tensor_mean_log(episode_dict, key, debug_terms[name], write_episode=True)
+                self._accumulate_tensor_mean_log(episode_dict, key, debug_terms[name], write_episode=True)
 
         self._accumulate_done_episode_stats(
             episode_dict,
             done_mask=done_mask,
             prev_episode_length_buf=prev_episode_length_buf,
-            prev_sampled_target_pos_b=prev_sampled_target_pos_b,
-            prev_target_pos_w=prev_target_pos_w,
-            terminal_tracking_errors=terminal_tracking_errors,
         )
         self._log_final_termination_terms(episode_dict, terminated=terminated, truncated=truncated)
 
