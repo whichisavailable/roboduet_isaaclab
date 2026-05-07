@@ -69,6 +69,7 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
         "leg_hip_thigh": DCMotorCfg(
             joint_names_expr=[r".*_hip_joint", r".*_thigh_joint"],
             effort_limit=23.7,
+            saturation_effort=23.7,
             velocity_limit=30.1,
             stiffness=35.0,
             damping=1.0,
@@ -77,6 +78,7 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
         "leg_calf": DCMotorCfg(
             joint_names_expr=[r".*_calf_joint"],
             effort_limit=45.43,
+            saturation_effort=45.43,
             velocity_limit=15.70,
             stiffness=35.0,
             damping=1.0,

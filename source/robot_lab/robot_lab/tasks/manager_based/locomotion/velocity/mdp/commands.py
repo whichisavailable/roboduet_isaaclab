@@ -819,10 +819,11 @@ class RewardThresholdCurriculum:
 class RoboDuetCommandCfg(CommandTermCfg):
     """Roboduet 原版联合 locomotion-manipulation 命令配置。"""
 
-    class_type: type = MISSING
+    class_type: type | None = None
     asset_name: str = "robot"
     base_body_name: str = GO2ARM_BASE_BODY_NAME
     ee_body_name: str = GO2ARM_EE_BODY_NAME
+    resampling_time_range: tuple[float, float] = (10.0, 10.0)
     resampling_time_s: float = 10.0
     command_curriculum_seed: int = 100
     switch_iteration: int = 10000
@@ -865,6 +866,10 @@ class RoboDuetCommandCfg(CommandTermCfg):
     gait_duration: float = 0.5
     gait_kappa: float = 0.07
     commands_scale_dog: tuple[float, float, float, float, float] = (1.0, 1.0, 1.0, 1.0, 1.0)
+
+    def __post_init__(self):
+        self.class_type = RoboDuetCommand
+        self.resampling_time_range = (self.resampling_time_s, self.resampling_time_s)
 
 
 class RoboDuetCommand(CommandTerm):
