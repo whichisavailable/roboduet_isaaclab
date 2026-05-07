@@ -3229,16 +3229,16 @@ def _compute_roboduet_reward_state(
             weighted_value = metric_value * scale
         weighted_terms[name] = weighted_value
         reward_dog_linear += weighted_value
-        if torch.sum(weighted_value) >= 0:
-            reward_pos_dog += weighted_value
-        elif torch.sum(weighted_value) <= 0:
-            reward_neg_dog += weighted_value
+        term_sum = torch.sum(weighted_value)
+        is_nonnegative = term_sum >= 0.0
+        pos_mask = is_nonnegative.to(dtype=weighted_value.dtype)
+        neg_mask = ((term_sum <= 0.0) & ~is_nonnegative).to(dtype=weighted_value.dtype)
+        reward_pos_dog += weighted_value * pos_mask
+        reward_neg_dog += weighted_value * neg_mask
         if name not in _ROBODUET_DOG_ONLY_TERMS:
             reward_arm_linear += weighted_value
-            if torch.sum(weighted_value) >= 0:
-                reward_pos_arm += weighted_value
-            elif torch.sum(weighted_value) <= 0:
-                reward_neg_arm += weighted_value
+            reward_pos_arm += weighted_value * pos_mask
+            reward_neg_arm += weighted_value * neg_mask
         if name in scales:
             command_value = float(scales[name]) + weighted_value if name in _ROBODUET_CONTACT_OFFSET_TERMS else weighted_value
             command_sums[name] += command_value

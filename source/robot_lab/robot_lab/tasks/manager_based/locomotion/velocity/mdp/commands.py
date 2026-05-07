@@ -899,6 +899,8 @@ class RoboDuetCommand(CommandTerm):
             key: torch.zeros(self.num_envs, device=self.device) for key in GO2ARM_COMMAND_CURRICULUM_KEYS
         }
         self.commands_scale_dog = torch.tensor(cfg.commands_scale_dog, device=self.device).unsqueeze(0)
+        self._identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        self._zero_arm_command_obs = torch.zeros_like(self.commands_arm_obs)
         # `switch_open=False` 时只训练/采样 locomotion；打开后再开始采样机械臂目标。
         self.switch_open = False
         self._curriculum = RewardThresholdCurriculum(
@@ -939,7 +941,7 @@ class RoboDuetCommand(CommandTerm):
         self.commands_arm[env_ids] = 0.0
         self.commands_arm_obs[env_ids] = 0.0
         self.target_abg[env_ids] = 0.0
-        self.obj_quats[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        self.obj_quats[env_ids] = self._identity_quat
         for key in self.command_sums:
             self.command_sums[key][env_ids] = 0.0
         self._update_switch_state()
@@ -1008,7 +1010,7 @@ class RoboDuetCommand(CommandTerm):
             if env_ids.numel() > 0:
                 self._resample_arm_commands(env_ids)
         self._step_contact_targets()
-        arm_command_obs = self.commands_arm_obs if self.switch_open else torch.zeros_like(self.commands_arm_obs)
+        arm_command_obs = self.commands_arm_obs if self.switch_open else self._zero_arm_command_obs
         self.command_buffer = torch.cat(
             (
                 self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
@@ -1094,11 +1096,18 @@ class RoboDuetCommand(CommandTerm):
         self.T_trajs[env_ids] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.traj_time_range)
         self.arm_time[env_ids] = 0.0
 
+    def _gait_normal_cdf(self, value: torch.Tensor, inv_scale: float) -> torch.Tensor:
+        return 0.5 * (1.0 + torch.erf(value * inv_scale))
+
     def _step_contact_targets(self) -> None:
         frequencies = self.cfg.gait_frequency
         phases, offsets, bounds = 0.5, 0.0, 0.0
         durations = self.cfg.gait_duration
+        stance_scale = 0.5 / durations
+        swing_scale = 0.5 / (1.0 - durations)
+        normal_inv_scale = 1.0 / (self.cfg.gait_kappa * math.sqrt(2.0))
         self.gait_indices = torch.remainder(self.gait_indices + self._env.step_dt * frequencies, 1.0)
+        standing = torch.norm(self.commands_dog[:, :3], dim=1) < 0.1
         foot_indices = [
             self.gait_indices + phases + offsets + bounds,
             self.gait_indices + offsets,
@@ -1106,21 +1115,23 @@ class RoboDuetCommand(CommandTerm):
             self.gait_indices + phases,
         ]
         for idxs in foot_indices:
-            standing = torch.norm(self.commands_dog[:, :3], dim=1) < 0.1
             idxs[standing] = 0.25
-            stance = torch.remainder(idxs, 1.0) < durations
+            wrapped = torch.remainder(idxs, 1.0)
+            stance = wrapped < durations
             swing = ~stance
-            idxs[stance] = torch.remainder(idxs[stance], 1.0) * (0.5 / durations)
-            idxs[swing] = 0.5 + (torch.remainder(idxs[swing], 1.0) - durations) * (0.5 / (1.0 - durations))
+            idxs[stance] = wrapped[stance] * stance_scale
+            idxs[swing] = 0.5 + (wrapped[swing] - durations) * swing_scale
         self.foot_indices = torch.remainder(torch.stack(foot_indices, dim=1), 1.0)
         self.clock_inputs = torch.sin(2.0 * math.pi * self.foot_indices)
-        normal = torch.distributions.normal.Normal(0.0, self.cfg.gait_kappa)
         desired_contact_states = []
         for phase in foot_indices:
             wrapped = torch.remainder(phase, 1.0)
-            desired = normal.cdf(wrapped) * (1.0 - normal.cdf(wrapped - 0.5)) + normal.cdf(
-                wrapped - 1.0
-            ) * (1.0 - normal.cdf(wrapped - 1.5))
+            desired = self._gait_normal_cdf(wrapped, normal_inv_scale) * (
+                1.0 - self._gait_normal_cdf(wrapped - 0.5, normal_inv_scale)
+            ) + (
+                self._gait_normal_cdf(wrapped - 1.0, normal_inv_scale)
+                * (1.0 - self._gait_normal_cdf(wrapped - 1.5, normal_inv_scale))
+            )
             desired_contact_states.append(desired)
         self.desired_contact_states = torch.stack(desired_contact_states, dim=1)
 

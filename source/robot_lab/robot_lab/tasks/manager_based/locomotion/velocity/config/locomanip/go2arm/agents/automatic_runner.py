@@ -129,6 +129,7 @@ class RoboDuetAutomaticRunner:
         logger_algorithm_cfg = dict(algorithm_cfg)
         logger_algorithm_cfg.setdefault("rnd_cfg", None)
         self.cfg["algorithm"] = logger_algorithm_cfg
+        algorithm_cfg.pop("rnd_cfg", None)
 
         dog_model_class = resolve_callable(dog_cfg.pop("class_name"))
         arm_model_class = resolve_callable(arm_cfg.pop("class_name"))
@@ -288,17 +289,25 @@ class RoboDuetAutomaticRunner:
         self.dog_obs_history[env_ids] = 0.0
         self.arm_obs_history[env_ids] = 0.0
 
-    def _get_dog_observations(self) -> dict[str, torch.Tensor]:
-        obs = self.env.get_observations()
-        dog_obs = obs["dog_policy"].to(self.device)
-        dog_privileged = obs["dog_privileged"].to(self.device)
+    def _get_dog_observations(self, obs: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
+        if obs is None:
+            obs_manager = self.env.unwrapped.observation_manager
+            dog_obs = obs_manager.compute_group("dog_policy").to(self.device)
+            dog_privileged = obs_manager.compute_group("dog_privileged").to(self.device)
+        else:
+            dog_obs = obs["dog_policy"].to(self.device)
+            dog_privileged = obs["dog_privileged"].to(self.device)
         self.dog_obs_history = torch.cat((self.dog_obs_history[:, self.dog_obs_dim :], dog_obs), dim=-1)
         return {"obs": dog_obs, "privileged_obs": dog_privileged, "obs_history": self.dog_obs_history}
 
-    def _get_arm_observations(self) -> dict[str, torch.Tensor]:
-        obs = self.env.get_observations()
-        arm_obs = obs["arm_policy"].to(self.device)
-        arm_privileged = obs["arm_privileged"].to(self.device)
+    def _get_arm_observations(self, obs: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
+        if obs is None:
+            obs_manager = self.env.unwrapped.observation_manager
+            arm_obs = obs_manager.compute_group("arm_policy").to(self.device)
+            arm_privileged = obs_manager.compute_group("arm_privileged").to(self.device)
+        else:
+            arm_obs = obs["arm_policy"].to(self.device)
+            arm_privileged = obs["arm_privileged"].to(self.device)
         self.arm_obs_history = torch.cat((self.arm_obs_history[:, self.arm_obs_dim :], arm_obs), dim=-1)
         return {"obs": arm_obs, "privileged_obs": arm_privileged, "obs_history": self.arm_obs_history}
 
@@ -306,11 +315,11 @@ class RoboDuetAutomaticRunner:
         if not self._command_term().switch_open:
             arm_actions = self.fake_arm_actions
         full_action = torch.cat((dog_actions, arm_actions), dim=-1)
-        _obs, _rew, dones, extras = self.env.step(full_action)
+        obs, _rew, dones, extras = self.env.step(full_action)
         raw_env = self.env.unwrapped
         rewards_dog = getattr(raw_env, "_roboduet_reward_dog").to(self.device)
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
-        return rewards_dog, rewards_arm, dones.to(self.device), extras
+        return obs, rewards_dog, rewards_arm, dones.to(self.device), extras
 
     @staticmethod
     def _make_loss_dict(prefix: str, loss_tuple) -> dict[str, float]:
@@ -351,6 +360,9 @@ class RoboDuetAutomaticRunner:
         self.logger.init_logging_writer()
 
         arm_obs_dict = self._get_arm_observations()
+        dog_obs_dict = None
+        if not self._command_term().switch_open:
+            dog_obs_dict = self._get_dog_observations()
         num_steps_per_env = int(self.cfg["num_steps_per_env"])
 
         start_it = self.current_learning_iteration
@@ -359,7 +371,8 @@ class RoboDuetAutomaticRunner:
             rollout_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):
-                    if self._command_term().switch_open:
+                    command_term = self._command_term()
+                    if command_term.switch_open:
                         actions_arm_cd = self.alg_arm.act(
                             arm_obs_dict["obs"],
                             arm_obs_dict["privileged_obs"],
@@ -367,10 +380,10 @@ class RoboDuetAutomaticRunner:
                         )
                         self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
                         arm_actions = actions_arm_cd[:, : self.arm_action_dim]
+                        dog_obs_dict = self._get_dog_observations()
                     else:
                         arm_actions = self.fake_arm_actions
 
-                    dog_obs_dict = self._get_dog_observations()
                     if rollout_step > 0:
                         self.alg_dog.process_env_step(rewards_dog, dones, extras)
                         if rollout_step == num_steps_per_env:
@@ -379,16 +392,18 @@ class RoboDuetAutomaticRunner:
                     actions_dog = self.alg_dog.act(
                         dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
                     )
-                    rewards_dog, rewards_arm, dones, extras = self._step_env(actions_dog, arm_actions)
+                    obs, rewards_dog, rewards_arm, dones, extras = self._step_env(actions_dog, arm_actions)
                     self.logger.process_env_step(rewards_dog, dones, extras)
                     self._process_arm_reward_step(rewards_arm, dones)
 
                     if self._command_term().switch_open:
-                        arm_obs_dict = self._get_arm_observations()
+                        arm_obs_dict = self._get_arm_observations(obs)
                         self.alg_arm.process_env_step(rewards_arm, dones, extras)
 
                     done_env_ids = dones.nonzero(as_tuple=False).flatten()
                     self._clear_cached(done_env_ids)
+                    if not self._command_term().switch_open:
+                        dog_obs_dict = self._get_dog_observations(obs)
 
                 collect_time = time.perf_counter() - rollout_start_time
                 if self._command_term().switch_open:

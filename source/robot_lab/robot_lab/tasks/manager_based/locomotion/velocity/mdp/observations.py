@@ -786,24 +786,63 @@ def roboduet_clock_inputs(env: ManagerBasedEnv, command_name: str) -> torch.Tens
     return _get_command_term(env, command_name).clock_inputs
 
 
-def _material_property(
-    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg, material_index: int, reduce_mean: bool = True
-) -> torch.Tensor:
-    asset: Articulation = env.scene[asset_cfg.name]
-    materials = asset.root_physx_view.get_material_properties()
-    body_ids = asset_cfg.body_ids
+def _material_body_ids(asset: Articulation, body_ids) -> tuple[int, ...]:
     if isinstance(body_ids, slice):
-        body_ids = list(range(*body_ids.indices(asset.num_bodies)))
+        return tuple(range(*body_ids.indices(asset.num_bodies)))
+    if body_ids is None:
+        return tuple(range(asset.num_bodies))
+    return tuple(int(body_id) for body_id in body_ids)
+
+
+def _material_shape_indices(
+    env: ManagerBasedEnv, asset: Articulation, asset_name: str, body_ids: tuple[int, ...]
+) -> tuple[int, ...]:
+    cache = getattr(env, "_roboduet_material_shape_indices_cache", None)
+    if cache is None:
+        cache = {}
+        env._roboduet_material_shape_indices_cache = cache
+    cache_key = (asset_name, body_ids)
+    if cache_key in cache:
+        return cache[cache_key]
+
     num_shapes_per_body = []
     for link_path in asset.root_physx_view.link_paths[0]:
         link_physx_view = asset._physics_sim_view.create_rigid_body_view(link_path)
         num_shapes_per_body.append(link_physx_view.max_shapes)
-    values = []
-    for body_id in body_ids:
-        shape_idx = sum(num_shapes_per_body[: body_id + 1]) - 1
-        values.append(materials[:, shape_idx, material_index])
-    stacked = torch.stack(values, dim=1).to(asset.device)
-    return torch.mean(stacked, dim=1, keepdim=True) if reduce_mean else stacked
+    shape_indices = tuple(sum(num_shapes_per_body[: body_id + 1]) - 1 for body_id in body_ids)
+    cache[cache_key] = shape_indices
+    return shape_indices
+
+
+def _material_values_are_static(env: ManagerBasedEnv) -> bool:
+    events_cfg = getattr(getattr(env, "cfg", None), "events", None)
+    material_event_cfg = getattr(events_cfg, "randomize_rigid_body_material", None)
+    return material_event_cfg is not None and getattr(material_event_cfg, "mode", None) == "startup"
+
+
+def _material_property(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg, material_index: int, reduce_mean: bool = True
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_ids = _material_body_ids(asset, asset_cfg.body_ids)
+    cache_key = (asset_cfg.name, body_ids, int(material_index), bool(reduce_mean))
+
+    value_cache = None
+    if _material_values_are_static(env):
+        value_cache = getattr(env, "_roboduet_material_property_cache", None)
+        if value_cache is None:
+            value_cache = {}
+            env._roboduet_material_property_cache = value_cache
+        if cache_key in value_cache:
+            return value_cache[cache_key]
+
+    materials = asset.root_physx_view.get_material_properties()
+    shape_indices = _material_shape_indices(env, asset, asset_cfg.name, body_ids)
+    stacked = materials[:, shape_indices, material_index].to(asset.device)
+    result = torch.mean(stacked, dim=1, keepdim=True) if reduce_mean else stacked
+    if value_cache is not None:
+        value_cache[cache_key] = result
+    return result
 
 
 def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
