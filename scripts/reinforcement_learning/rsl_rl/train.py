@@ -95,7 +95,6 @@ from datetime import datetime
 import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
-from rsl_rl.utils import resolve_callable
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -113,6 +112,9 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import robot_lab.tasks  # noqa: F401  # isort: skip
+from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.callable_resolver import (
+    resolve_callable,
+)
 
 # import logger
 logger = logging.getLogger(__name__)
