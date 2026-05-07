@@ -126,8 +126,9 @@ class RoboDuetAutomaticRunner:
         dog_cfg = dict(self.cfg["dog_model"])
         arm_cfg = dict(self.cfg["arm_model"])
         algorithm_cfg = dict(self.cfg["algorithm"])
-        algorithm_cfg.setdefault("rnd_cfg", None)
-        self.cfg["algorithm"] = algorithm_cfg
+        logger_algorithm_cfg = dict(algorithm_cfg)
+        logger_algorithm_cfg.setdefault("rnd_cfg", None)
+        self.cfg["algorithm"] = logger_algorithm_cfg
 
         dog_model_class = resolve_callable(dog_cfg.pop("class_name"))
         arm_model_class = resolve_callable(arm_cfg.pop("class_name"))
