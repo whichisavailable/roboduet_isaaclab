@@ -147,6 +147,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._reward_log_counts: dict[str, torch.Tensor] = {}
         self._go2arm_reward_cache = None
         self._go2arm_reward_cache_term_name = None
+        self._roboduet_reward_step_cache = None
         self.action_manager.prev_prev_action = torch.zeros_like(self.action_manager.action)
         self.num_plan_actions = 2
         self.plan_actions = torch.zeros(self.num_envs, self.num_plan_actions, device=self.device)
@@ -257,17 +258,17 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
     ) -> None:
         if not torch.any(done_mask):
             return
-        episode_sums = getattr(self, "_roboduet_episode_sums", None)
-        if not isinstance(episode_sums, dict):
+        log_episode_sums = getattr(self, "_roboduet_log_episode_sums", None)
+        if not isinstance(log_episode_sums, dict):
             return
         done_ids = torch.where(done_mask)[0]
         reward_names = tuple(getattr(self, "_roboduet_reward_term_names", ()))
         for name in reward_names + ("total",):
-            if name not in episode_sums:
+            if name not in log_episode_sums:
                 continue
-            values = episode_sums[name][done_ids]
+            values = log_episode_sums[name][done_ids]
             self._accumulate_tensor_mean_log(episode_dict, f"rew_{name}", values, write_episode=True)
-            episode_sums[name][done_ids] = 0.0
+            log_episode_sums[name][done_ids] = 0.0
         command_sums = getattr(self, "_roboduet_command_sums", None)
         if isinstance(command_sums, dict):
             for values in command_sums.values():
@@ -420,6 +421,13 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         if not isinstance(log_dict, dict):
             return
         filtered_log_dict = self._filter_episode_log_dict(log_dict)
+        roboduet_reward_names = tuple(getattr(self, "_roboduet_reward_term_names", ()))
+        if filtered_log_dict and roboduet_reward_names:
+            blocked_reward_keys = {f"Episode_Reward/{name}" for name in roboduet_reward_names}
+            blocked_reward_keys.add("Episode_Reward/total_reward")
+            filtered_log_dict = {
+                key: value for key, value in filtered_log_dict.items() if key not in blocked_reward_keys
+            }
         if filtered_log_dict:
             episode_dict.update(filtered_log_dict)
         extras["log"] = filtered_log_dict
@@ -646,6 +654,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
     def step(self, action: torch.Tensor):
         self._go2arm_reward_cache = None
         self._go2arm_reward_cache_term_name = None
+        self._roboduet_reward_step_cache = None
         self.action_manager.prev_prev_action = self.action_manager.prev_action.clone()
         prev_episode_length_buf = self.episode_length_buf.clone()
         command_term = self._command_term()
@@ -725,7 +734,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
 
         reward_term_name = "total_reward"
         terminal_tracking_errors = None
-        if reward_term_name in self.reward_manager.active_terms and hasattr(self, "_roboduet_episode_sums"):
+        if reward_term_name in self.reward_manager.active_terms and hasattr(self, "_roboduet_reward_term_names"):
             self._log_roboduet_reward_terms(episode_dict, done_mask)
         elif self._enable_debug_reward_logging and reward_term_name in self.reward_manager.active_terms:
             debug_terms = mdp.go2arm_reward_debug_terms(self, total_reward_term_name=reward_term_name)

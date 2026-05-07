@@ -922,12 +922,18 @@ class RoboDuetCommand(CommandTerm):
     def command(self) -> torch.Tensor:
         return self.command_buffer
 
-    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         if env_ids is None:
             env_ids = slice(None)
             env_ids_tensor = torch.arange(self.num_envs, device=self.device)
         else:
             env_ids_tensor = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        extras = {}
+        for metric_name, metric_value in self.metrics.items():
+            extras[metric_name] = torch.mean(metric_value[env_ids]).item()
+            metric_value[env_ids] = 0.0
+        self.command_counter[env_ids] = 0
+        self.time_left[env_ids] = self.time_left[env_ids].uniform_(*self.cfg.resampling_time_range)
         self.arm_time[env_ids] = 0.0
         self.gait_indices[env_ids] = 0.0
         self.commands_arm[env_ids] = 0.0
@@ -941,6 +947,7 @@ class RoboDuetCommand(CommandTerm):
         if self.switch_open:
             self._resample_arm_commands(env_ids_tensor)
         self._step_contact_targets()
+        return extras
 
     def _update_metrics(self):
         pass

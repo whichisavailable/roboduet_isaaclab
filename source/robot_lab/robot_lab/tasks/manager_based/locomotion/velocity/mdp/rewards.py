@@ -43,6 +43,8 @@ _ROBODUET_COMMAND_LOG_EXTRA_KEYS = (
     "ang_vel_residual",
     "ep_timesteps",
 )
+_ROBODUET_DOG_ONLY_TERMS = ("tracking_lin_vel", "tracking_ang_vel")
+_ROBODUET_CONTACT_OFFSET_TERMS = ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel")
 
 
 def _ee_pose_command_term(env: ManagerBasedRLEnv, command_name: str):
@@ -73,22 +75,22 @@ def _get_go2arm_potential_term_cfg(env: ManagerBasedRLEnv):
 
 def _ensure_roboduet_logging_buffers(
     env: ManagerBasedRLEnv, hybrid_scales: dict[str, float]
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+) -> dict[str, torch.Tensor]:
     reward_names = tuple(hybrid_scales.keys())
     expected_command_names = reward_names + _ROBODUET_COMMAND_LOG_EXTRA_KEYS
     if getattr(env, "_roboduet_reward_term_names", None) != reward_names:
         env._roboduet_reward_term_names = reward_names
-        env._roboduet_episode_sums = {
+        env._roboduet_log_episode_sums = {
             name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device) for name in reward_names
         }
-        env._roboduet_episode_sums["total"] = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+        env._roboduet_log_episode_sums["total"] = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
     if getattr(env, "_roboduet_command_term_names", None) != expected_command_names:
         env._roboduet_command_term_names = expected_command_names
         env._roboduet_command_sums = {
             name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
             for name in expected_command_names
         }
-    return env._roboduet_episode_sums, env._roboduet_command_sums
+    return env._roboduet_command_sums
 
 
 def _get_go2arm_support_contact_stats(
@@ -1518,21 +1520,31 @@ def non_success_termination_penalty(
 def _compute_go2arm_reward_terms(
     env: ManagerBasedRLEnv,
     total_reward_term_name: str = "total_reward",
+    store_cache: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Compute and cache go2arm reward atomics for the current step."""
-    params = env.reward_manager.get_term_cfg(total_reward_term_name).params
+    params = _get_go2arm_total_reward_params(env, total_reward_term_name)
     command_term = _ee_pose_command_term(env, params["gating_command_name"])
 
     # -----------------------------
     # 1) 单步快照：同一步里 gate / mani / loco / debug 统一用这一份
     # -----------------------------
-    tracking_error = command_term.tracking_error.clone()
-    position_tracking_error = command_term.position_tracking_error.clone()
-    orientation_tracking_error = command_term.orientation_tracking_error.clone()
-    reference_tracking_error = command_term.reference_tracking_error.clone()
-    cumulative_tracking_error = command_term.cumulative_tracking_error.clone()
-    ee_pos_b = command_term.ee_pos_b.clone()
-    target_pos_b = command_term.target_pos_b.clone()
+    if store_cache:
+        tracking_error = command_term.tracking_error.clone()
+        position_tracking_error = command_term.position_tracking_error.clone()
+        orientation_tracking_error = command_term.orientation_tracking_error.clone()
+        reference_tracking_error = command_term.reference_tracking_error.clone()
+        cumulative_tracking_error = command_term.cumulative_tracking_error.clone()
+        ee_pos_b = command_term.ee_pos_b.clone()
+        target_pos_b = command_term.target_pos_b.clone()
+    else:
+        tracking_error = command_term.tracking_error
+        position_tracking_error = command_term.position_tracking_error
+        orientation_tracking_error = command_term.orientation_tracking_error
+        reference_tracking_error = command_term.reference_tracking_error
+        cumulative_tracking_error = command_term.cumulative_tracking_error
+        ee_pos_b = command_term.ee_pos_b
+        target_pos_b = command_term.target_pos_b
     del ee_pos_b, target_pos_b
     # -----------------------------
     # 2) gate：直接用冻结后的 reference_tracking_error
@@ -1681,9 +1693,12 @@ def _compute_go2arm_reward_terms(
     # -----------------------------
     # 5) potential：保持你现在的状态项接法不变
     # -----------------------------
-    potential_term_cfg = env.reward_manager.get_term_cfg("ee_tracking_potential")
+    potential_term_cfg = _get_go2arm_potential_term_cfg(env)
     if isinstance(potential_term_cfg.func, EETrackingPotentialReward):
-        ee_tracking_potential_value = potential_term_cfg.func.last_reward.clone()
+        if store_cache:
+            ee_tracking_potential_value = potential_term_cfg.func.last_reward.clone()
+        else:
+            ee_tracking_potential_value = potential_term_cfg.func.last_reward
     else:
         ee_tracking_potential_value = torch.zeros(env.num_envs, device=env.device)
 
@@ -1904,6 +1919,9 @@ def _compute_go2arm_reward_terms(
     # -----------------------------
     # 11) 单次计算后统一缓存，供日志直接复用
     # -----------------------------
+    if not store_cache:
+        return {"total_reward_debug": total}
+
     cache = {
         "gate_d": gate,
         "tracking_error": tracking_error,
@@ -2260,7 +2278,10 @@ def total_reward(
         basic_joint_power_asset_cfg,
         basic_joint_power_normalize_by_effort_limit,
     )
-    cache = _compute_go2arm_reward_terms(env)
+    cache = _compute_go2arm_reward_terms(
+        env,
+        store_cache=bool(getattr(env, "_enable_debug_reward_logging", False)),
+    )
     return cache["total_reward_debug"]
 
 
@@ -2272,7 +2293,7 @@ def go2arm_reward_debug_terms(
     cache_term_name = getattr(env, "_go2arm_reward_cache_term_name", None)
     if cache is not None and cache_term_name == total_reward_term_name:
         return cache
-    return _compute_go2arm_reward_terms(env, total_reward_term_name=total_reward_term_name)
+    return _compute_go2arm_reward_terms(env, total_reward_term_name=total_reward_term_name, store_cache=True)
 
 
 def track_lin_vel_xy_exp(
@@ -2983,6 +3004,373 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     return reward
 
 
+def _compute_roboduet_reward_state(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    pretrained_scales: dict[str, float],
+    hybrid_scales: dict[str, float],
+    only_positive_rewards: bool,
+    only_positive_rewards_ji22_style: bool,
+    sigma_rew_neg: float,
+    tracking_sigma: float,
+    tracking_sigma_yaw: float,
+    gait_force_sigma: float,
+    gait_vel_sigma: float,
+    illegal_contact_sensor_cfg: SceneEntityCfg,
+    foot_sensor_cfg: SceneEntityCfg,
+    foot_asset_cfg: SceneEntityCfg,
+    leg_joint_cfg: SceneEntityCfg,
+    arm_joint_cfg: SceneEntityCfg,
+    base_body_cfg: SceneEntityCfg,
+    ee_body_cfg: SceneEntityCfg,
+    manip_weight_lpy: float,
+    manip_weight_rpy: float,
+) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+    del base_body_cfg
+    command_sums = _ensure_roboduet_logging_buffers(env, hybrid_scales)
+    log_episode_sums = getattr(env, "_roboduet_log_episode_sums")
+    term = env.command_manager.get_term(command_name)
+    cache_key = (getattr(env, "common_step_counter", -1), bool(term.switch_open))
+    cached_state = getattr(env, "_roboduet_reward_step_cache", None)
+    if cached_state is not None and cached_state.get("key") == cache_key:
+        return cached_state["value"]
+
+    scales = hybrid_scales if term.switch_open else pretrained_scales
+    reward_names = tuple(hybrid_scales.keys())
+    robot: Articulation = env.scene["robot"]
+    reward_dog_linear = torch.zeros(env.num_envs, device=env.device)
+    reward_arm_linear = torch.zeros(env.num_envs, device=env.device)
+    reward_pos_dog = torch.zeros(env.num_envs, device=env.device)
+    reward_neg_dog = torch.zeros(env.num_envs, device=env.device)
+    reward_pos_arm = torch.zeros(env.num_envs, device=env.device)
+    reward_neg_arm = torch.zeros(env.num_envs, device=env.device)
+    foot_forces = get_go2arm_precise_foot_normal_forces(env, foot_sensor_cfg)
+    if foot_forces is None:
+        raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
+    foot_velocities = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_center_lin_vel_w"]
+    root_lin_vel_b = robot.data.root_lin_vel_b
+    root_ang_vel_b = robot.data.root_ang_vel_b
+    desired_contact = term.desired_contact_states
+
+    metrics: dict[str, torch.Tensor] = {}
+    metrics["tracking_lin_vel"] = torch.exp(
+        -torch.sum(torch.square(term.commands_dog[:, :2] - root_lin_vel_b[:, :2]), dim=1) / tracking_sigma
+    )
+    metrics["tracking_ang_vel"] = torch.exp(
+        -torch.square(term.commands_dog[:, 2] - root_ang_vel_b[:, 2]) / tracking_sigma_yaw
+    )
+    metrics["lin_vel_z"] = torch.square(root_lin_vel_b[:, 2])
+    metrics["ang_vel_xy"] = torch.sum(torch.square(root_ang_vel_b[:, :2]), dim=1)
+    quat_roll = quat_from_euler_xyz(
+        -term.commands_dog[:, 4], torch.zeros_like(term.commands_dog[:, 4]), torch.zeros_like(term.commands_dog[:, 4])
+    )
+    quat_pitch = quat_from_euler_xyz(
+        torch.zeros_like(term.commands_dog[:, 3]), -term.commands_dog[:, 3], torch.zeros_like(term.commands_dog[:, 3])
+    )
+    desired_base_quat = quat_mul(quat_roll, quat_pitch)
+    desired_projected_gravity = quat_apply_inverse(
+        desired_base_quat,
+        torch.tensor([0.0, 0.0, -1.0], device=env.device, dtype=robot.data.projected_gravity_b.dtype).expand(
+            env.num_envs, 3
+        ),
+    )
+    metrics["orientation_control"] = torch.sum(
+        torch.square(robot.data.projected_gravity_b[:, :2] - desired_projected_gravity[:, :2]),
+        dim=1,
+    )
+    metrics["loco_energy"] = torch.sum(
+        torch.square(
+            robot.data.applied_torque[:, leg_joint_cfg.joint_ids] * robot.data.joint_vel[:, leg_joint_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    metrics["feet_slip"] = torch.sum(
+        (foot_forces > 1.0).float() * torch.sum(torch.square(foot_velocities[:, :, :2]), dim=2),
+        dim=1,
+    )
+    phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
+    ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SENSOR_NAMES)
+    contact_point_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2] - 0.022
+    ground_height = torch.where(ground_height_data["is_valid"], ground_height_data["ground_height_w"], contact_point_height)
+    foot_height = contact_point_height - ground_height
+    target_height = 0.04 * phases + 0.02
+    metrics["feet_clearance_cmd_linear"] = torch.sum(
+        torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
+    )
+    metrics["tracking_contacts_shaped_force"] = -torch.sum(
+        (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_forces) / gait_force_sigma)),
+        dim=1,
+    ) / 4.0
+    metrics["tracking_contacts_shaped_vel"] = -torch.sum(
+        desired_contact * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
+        dim=1,
+    ) / 4.0
+    illegal_sensor = env.scene.sensors[illegal_contact_sensor_cfg.name]
+    illegal_forces = illegal_sensor.data.net_forces_w[:, illegal_contact_sensor_cfg.body_ids, :]
+    metrics["collision"] = torch.sum((torch.norm(illegal_forces, dim=-1) > 0.1).float(), dim=1)
+    current_lpy = roboduet_current_lpy(env, ee_body_cfg)
+    current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
+    lpy_range = torch.tensor(
+        [
+            term.cfg.l_range[1] - term.cfg.l_range[0],
+            term.cfg.p_range[1] - term.cfg.p_range[0],
+            term.cfg.y_range[1] - term.cfg.y_range[0],
+        ],
+        device=env.device,
+        dtype=current_lpy.dtype,
+    ).unsqueeze(0)
+    rpy_range = torch.tensor(
+        [
+            term.cfg.roll_ee_range[1] - term.cfg.roll_ee_range[0],
+            term.cfg.pitch_ee_range[1] - term.cfg.pitch_ee_range[0],
+            term.cfg.yaw_ee_range[1] - term.cfg.yaw_ee_range[0],
+        ],
+        device=env.device,
+        dtype=current_abg.dtype,
+    ).unsqueeze(0)
+    lpy_error = torch.sum(torch.abs(current_lpy - term.commands_arm_obs[:, :3]) / lpy_range, dim=1)
+    rpy_error = torch.sum(torch.abs(current_abg - term.target_abg) / rpy_range, dim=1)
+    metrics["arm_manip_commands_tracking_combine"] = torch.exp(-(manip_weight_lpy * lpy_error + manip_weight_rpy * rpy_error))
+    metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
+    metrics["arm_energy"] = torch.sum(
+        torch.square(
+            robot.data.applied_torque[:, arm_joint_cfg.joint_ids] * robot.data.joint_vel[:, arm_joint_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    prev_joint_vel = getattr(env, "_roboduet_prev_joint_vel", torch.zeros_like(robot.data.joint_vel))
+    metrics["arm_dof_acc"] = torch.sum(
+        torch.square(
+            (prev_joint_vel[:, arm_joint_cfg.joint_ids] - robot.data.joint_vel[:, arm_joint_cfg.joint_ids]) / env.step_dt
+        ),
+        dim=1,
+    )
+    metrics["arm_action_rate"] = torch.sum(
+        torch.square(
+            env.action_manager.prev_action[:, arm_joint_cfg.joint_ids]
+            - env.action_manager.action[:, arm_joint_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    plan_actions = getattr(env, "plan_actions", torch.zeros(env.num_envs, 2, device=env.device))
+    last_plan_actions = getattr(env, "last_plan_actions", torch.zeros_like(plan_actions))
+    metrics["arm_control_limits"] = (
+        torch.clamp(term.cfg.limit_body_pitch[0] - plan_actions[:, 0], min=0.0)
+        + torch.clamp(plan_actions[:, 0] - term.cfg.limit_body_pitch[1], min=0.0)
+        + torch.clamp(term.cfg.limit_body_roll[0] - plan_actions[:, 1], min=0.0)
+        + torch.clamp(plan_actions[:, 1] - term.cfg.limit_body_roll[1], min=0.0)
+    )
+    plan_action_valid = (last_plan_actions != 0.0).float()
+    metrics["arm_control_smoothness_1"] = torch.sum(
+        torch.square(plan_actions - last_plan_actions) * plan_action_valid,
+        dim=1,
+    )
+    metrics["dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, leg_joint_cfg.joint_ids]), dim=1)
+    metrics["dof_acc"] = torch.sum(
+        torch.square(
+            (prev_joint_vel[:, leg_joint_cfg.joint_ids] - robot.data.joint_vel[:, leg_joint_cfg.joint_ids]) / env.step_dt
+        ),
+        dim=1,
+    )
+    metrics["action_rate"] = torch.sum(
+        torch.square(
+            env.action_manager.prev_action[:, leg_joint_cfg.joint_ids]
+            - env.action_manager.action[:, leg_joint_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    joint_pos_target = getattr(env, "_go2arm_joint_pos_target", torch.zeros_like(env.action_manager.action))
+    last_joint_pos_target = getattr(env, "_go2arm_last_joint_pos_target", torch.zeros_like(joint_pos_target))
+    last_last_joint_pos_target = getattr(env, "_go2arm_last_last_joint_pos_target", torch.zeros_like(joint_pos_target))
+    leg_valid = (env.action_manager.prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
+    leg_valid_2 = (env.action_manager.prev_prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
+    arm_valid = (env.action_manager.prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
+    arm_valid_2 = (env.action_manager.prev_prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
+    metrics["action_smoothness_1"] = torch.sum(
+        torch.square(joint_pos_target[:, leg_joint_cfg.joint_ids] - last_joint_pos_target[:, leg_joint_cfg.joint_ids])
+        * leg_valid,
+        dim=1,
+    )
+    metrics["action_smoothness_2"] = torch.sum(
+        torch.square(
+            joint_pos_target[:, leg_joint_cfg.joint_ids]
+            - 2.0 * last_joint_pos_target[:, leg_joint_cfg.joint_ids]
+            + last_last_joint_pos_target[:, leg_joint_cfg.joint_ids]
+        )
+        * leg_valid
+        * leg_valid_2,
+        dim=1,
+    )
+    metrics["arm_action_smoothness_1"] = torch.sum(
+        torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids] - last_joint_pos_target[:, arm_joint_cfg.joint_ids])
+        * arm_valid,
+        dim=1,
+    )
+    metrics["arm_action_smoothness_2"] = torch.sum(
+        torch.square(
+            joint_pos_target[:, arm_joint_cfg.joint_ids]
+            - 2.0 * last_joint_pos_target[:, arm_joint_cfg.joint_ids]
+            + last_last_joint_pos_target[:, arm_joint_cfg.joint_ids]
+        )
+        * arm_valid
+        * arm_valid_2,
+        dim=1,
+    )
+    metrics["torques"] = torch.sum(torch.square(robot.data.applied_torque[:, leg_joint_cfg.joint_ids]), dim=1)
+    metrics["hip_action_l2"] = torch.sum(torch.square(roboduet_current_action(env)[:, [0, 3, 6, 9]]), dim=1)
+
+    weighted_terms: dict[str, torch.Tensor] = {}
+    for name in reward_names:
+        scale = float(scales.get(name, 0.0))
+        metric_value = metrics.get(name)
+        weighted_value = torch.zeros(env.num_envs, device=env.device)
+        if metric_value is not None and scale != 0.0:
+            weighted_value = metric_value * scale
+        weighted_terms[name] = weighted_value
+        reward_dog_linear += weighted_value
+        if torch.sum(weighted_value) >= 0:
+            reward_pos_dog += weighted_value
+        elif torch.sum(weighted_value) <= 0:
+            reward_neg_dog += weighted_value
+        if name not in _ROBODUET_DOG_ONLY_TERMS:
+            reward_arm_linear += weighted_value
+            if torch.sum(weighted_value) >= 0:
+                reward_pos_arm += weighted_value
+            elif torch.sum(weighted_value) <= 0:
+                reward_neg_arm += weighted_value
+        if name in scales:
+            command_value = float(scales[name]) + weighted_value if name in _ROBODUET_CONTACT_OFFSET_TERMS else weighted_value
+            command_sums[name] += command_value
+            if name in GO2ARM_COMMAND_CURRICULUM_KEYS:
+                term.accumulate_metric(name, command_value)
+        log_episode_sums[name] += weighted_value
+
+    if only_positive_rewards:
+        reward_dog = torch.clamp(reward_dog_linear, min=0.0)
+        reward_arm = torch.clamp(reward_arm_linear, min=0.0)
+    elif only_positive_rewards_ji22_style:
+        reward_dog = reward_pos_dog * torch.exp(reward_neg_dog / float(sigma_rew_neg))
+        reward_arm = reward_pos_arm * torch.exp(reward_neg_arm / float(sigma_rew_neg))
+    else:
+        reward_dog = reward_dog_linear
+        reward_arm = reward_arm_linear
+    log_episode_sums["total"] += reward_dog
+
+    command_sums["lin_vel_raw"] += root_lin_vel_b[:, 0]
+    command_sums["ang_vel_raw"] += root_ang_vel_b[:, 2]
+    command_sums["lin_vel_residual"] += torch.square(root_lin_vel_b[:, 0] - term.commands_dog[:, 0])
+    command_sums["ang_vel_residual"] += torch.square(root_ang_vel_b[:, 2] - term.commands_dog[:, 2])
+    command_sums["ep_timesteps"] += 1.0
+    env._roboduet_reward_dog = reward_dog.detach().clone()
+    env._roboduet_reward_arm = reward_arm.detach().clone()
+    env._roboduet_prev_joint_vel = robot.data.joint_vel.detach().clone()
+
+    reward_state = {
+        "weighted_terms": weighted_terms,
+        "reward_dog_linear": reward_dog_linear,
+        "reward_dog": reward_dog,
+        "reward_arm": reward_arm,
+        "total_adjustment": reward_dog - reward_dog_linear,
+    }
+    env._roboduet_reward_step_cache = {"key": cache_key, "value": reward_state}
+    return reward_state
+
+
+def roboduet_weighted_reward_term(
+    env: ManagerBasedRLEnv,
+    reward_term_name: str,
+    command_name: str,
+    pretrained_scales: dict[str, float],
+    hybrid_scales: dict[str, float],
+    only_positive_rewards: bool,
+    only_positive_rewards_ji22_style: bool,
+    sigma_rew_neg: float,
+    tracking_sigma: float,
+    tracking_sigma_yaw: float,
+    gait_force_sigma: float,
+    gait_vel_sigma: float,
+    illegal_contact_sensor_cfg: SceneEntityCfg,
+    foot_sensor_cfg: SceneEntityCfg,
+    foot_asset_cfg: SceneEntityCfg,
+    leg_joint_cfg: SceneEntityCfg,
+    arm_joint_cfg: SceneEntityCfg,
+    base_body_cfg: SceneEntityCfg,
+    ee_body_cfg: SceneEntityCfg,
+    manip_weight_lpy: float,
+    manip_weight_rpy: float,
+) -> torch.Tensor:
+    reward_state = _compute_roboduet_reward_state(
+        env=env,
+        command_name=command_name,
+        pretrained_scales=pretrained_scales,
+        hybrid_scales=hybrid_scales,
+        only_positive_rewards=only_positive_rewards,
+        only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
+        sigma_rew_neg=sigma_rew_neg,
+        tracking_sigma=tracking_sigma,
+        tracking_sigma_yaw=tracking_sigma_yaw,
+        gait_force_sigma=gait_force_sigma,
+        gait_vel_sigma=gait_vel_sigma,
+        illegal_contact_sensor_cfg=illegal_contact_sensor_cfg,
+        foot_sensor_cfg=foot_sensor_cfg,
+        foot_asset_cfg=foot_asset_cfg,
+        leg_joint_cfg=leg_joint_cfg,
+        arm_joint_cfg=arm_joint_cfg,
+        base_body_cfg=base_body_cfg,
+        ee_body_cfg=ee_body_cfg,
+        manip_weight_lpy=manip_weight_lpy,
+        manip_weight_rpy=manip_weight_rpy,
+    )
+    return reward_state["weighted_terms"][reward_term_name]
+
+
+def roboduet_total_reward_adjustment(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    pretrained_scales: dict[str, float],
+    hybrid_scales: dict[str, float],
+    only_positive_rewards: bool,
+    only_positive_rewards_ji22_style: bool,
+    sigma_rew_neg: float,
+    tracking_sigma: float,
+    tracking_sigma_yaw: float,
+    gait_force_sigma: float,
+    gait_vel_sigma: float,
+    illegal_contact_sensor_cfg: SceneEntityCfg,
+    foot_sensor_cfg: SceneEntityCfg,
+    foot_asset_cfg: SceneEntityCfg,
+    leg_joint_cfg: SceneEntityCfg,
+    arm_joint_cfg: SceneEntityCfg,
+    base_body_cfg: SceneEntityCfg,
+    ee_body_cfg: SceneEntityCfg,
+    manip_weight_lpy: float,
+    manip_weight_rpy: float,
+) -> torch.Tensor:
+    reward_state = _compute_roboduet_reward_state(
+        env=env,
+        command_name=command_name,
+        pretrained_scales=pretrained_scales,
+        hybrid_scales=hybrid_scales,
+        only_positive_rewards=only_positive_rewards,
+        only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
+        sigma_rew_neg=sigma_rew_neg,
+        tracking_sigma=tracking_sigma,
+        tracking_sigma_yaw=tracking_sigma_yaw,
+        gait_force_sigma=gait_force_sigma,
+        gait_vel_sigma=gait_vel_sigma,
+        illegal_contact_sensor_cfg=illegal_contact_sensor_cfg,
+        foot_sensor_cfg=foot_sensor_cfg,
+        foot_asset_cfg=foot_asset_cfg,
+        leg_joint_cfg=leg_joint_cfg,
+        arm_joint_cfg=arm_joint_cfg,
+        base_body_cfg=base_body_cfg,
+        ee_body_cfg=ee_body_cfg,
+        manip_weight_lpy=manip_weight_lpy,
+        manip_weight_rpy=manip_weight_rpy,
+    )
+    return reward_state["total_adjustment"]
+
+
 class RoboDuetReward(ManagerTermBase):
     def __call__(
         self,
@@ -3007,232 +3395,26 @@ class RoboDuetReward(ManagerTermBase):
         manip_weight_lpy: float,
         manip_weight_rpy: float,
     ) -> torch.Tensor:
-        del base_body_cfg
-        term = env.command_manager.get_term(command_name)
-        scales = hybrid_scales if term.switch_open else pretrained_scales
-        episode_sums, command_sums = _ensure_roboduet_logging_buffers(env, hybrid_scales)
-        robot: Articulation = env.scene["robot"]
-        reward_dog = torch.zeros(env.num_envs, device=env.device)
-        reward_arm = torch.zeros(env.num_envs, device=env.device)
-        reward_pos_dog = torch.zeros(env.num_envs, device=env.device)
-        reward_neg_dog = torch.zeros(env.num_envs, device=env.device)
-        reward_pos_arm = torch.zeros(env.num_envs, device=env.device)
-        reward_neg_arm = torch.zeros(env.num_envs, device=env.device)
-        foot_forces = get_go2arm_precise_foot_normal_forces(env, foot_sensor_cfg)
-        if foot_forces is None:
-            raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
-        foot_velocities = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_center_lin_vel_w"]
-        root_lin_vel_b = robot.data.root_lin_vel_b
-        root_ang_vel_b = robot.data.root_ang_vel_b
-        desired_contact = term.desired_contact_states
-
-        metrics: dict[str, torch.Tensor] = {}
-        metrics["tracking_lin_vel"] = torch.exp(
-            -torch.sum(torch.square(term.commands_dog[:, :2] - root_lin_vel_b[:, :2]), dim=1) / tracking_sigma
+        reward_state = _compute_roboduet_reward_state(
+            env=env,
+            command_name=command_name,
+            pretrained_scales=pretrained_scales,
+            hybrid_scales=hybrid_scales,
+            only_positive_rewards=only_positive_rewards,
+            only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
+            sigma_rew_neg=sigma_rew_neg,
+            tracking_sigma=tracking_sigma,
+            tracking_sigma_yaw=tracking_sigma_yaw,
+            gait_force_sigma=gait_force_sigma,
+            gait_vel_sigma=gait_vel_sigma,
+            illegal_contact_sensor_cfg=illegal_contact_sensor_cfg,
+            foot_sensor_cfg=foot_sensor_cfg,
+            foot_asset_cfg=foot_asset_cfg,
+            leg_joint_cfg=leg_joint_cfg,
+            arm_joint_cfg=arm_joint_cfg,
+            base_body_cfg=base_body_cfg,
+            ee_body_cfg=ee_body_cfg,
+            manip_weight_lpy=manip_weight_lpy,
+            manip_weight_rpy=manip_weight_rpy,
         )
-        metrics["tracking_ang_vel"] = torch.exp(
-            -torch.square(term.commands_dog[:, 2] - root_ang_vel_b[:, 2]) / tracking_sigma_yaw
-        )
-        metrics["lin_vel_z"] = torch.square(root_lin_vel_b[:, 2])
-        metrics["ang_vel_xy"] = torch.sum(torch.square(root_ang_vel_b[:, :2]), dim=1)
-        quat_roll = quat_from_euler_xyz(
-            -term.commands_dog[:, 4], torch.zeros_like(term.commands_dog[:, 4]), torch.zeros_like(term.commands_dog[:, 4])
-        )
-        quat_pitch = quat_from_euler_xyz(
-            torch.zeros_like(term.commands_dog[:, 3]), -term.commands_dog[:, 3], torch.zeros_like(term.commands_dog[:, 3])
-        )
-        desired_base_quat = quat_mul(quat_roll, quat_pitch)
-        desired_projected_gravity = quat_apply_inverse(
-            desired_base_quat,
-            torch.tensor([0.0, 0.0, -1.0], device=env.device, dtype=robot.data.projected_gravity_b.dtype).expand(
-                env.num_envs, 3
-            ),
-        )
-        metrics["orientation_control"] = torch.sum(
-            torch.square(robot.data.projected_gravity_b[:, :2] - desired_projected_gravity[:, :2]),
-            dim=1,
-        )
-        metrics["loco_energy"] = torch.sum(
-            torch.square(
-                robot.data.applied_torque[:, leg_joint_cfg.joint_ids] * robot.data.joint_vel[:, leg_joint_cfg.joint_ids]
-            ),
-            dim=1,
-        )
-        metrics["feet_slip"] = torch.sum(
-            (foot_forces > 1.0).float() * torch.sum(torch.square(foot_velocities[:, :, :2]), dim=2),
-            dim=1,
-        )
-        phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
-        ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SENSOR_NAMES)
-        contact_point_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2] - 0.022
-        ground_height = torch.where(ground_height_data["is_valid"], ground_height_data["ground_height_w"], contact_point_height)
-        foot_height = contact_point_height - ground_height
-        target_height = 0.04 * phases + 0.02
-        metrics["feet_clearance_cmd_linear"] = torch.sum(
-            torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
-        )
-        metrics["tracking_contacts_shaped_force"] = -torch.sum(
-            (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_forces) / gait_force_sigma)),
-            dim=1,
-        ) / 4.0
-        metrics["tracking_contacts_shaped_vel"] = -torch.sum(
-            desired_contact * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
-            dim=1,
-        ) / 4.0
-        illegal_sensor = env.scene.sensors[illegal_contact_sensor_cfg.name]
-        illegal_forces = illegal_sensor.data.net_forces_w[:, illegal_contact_sensor_cfg.body_ids, :]
-        metrics["collision"] = torch.sum((torch.norm(illegal_forces, dim=-1) > 0.1).float(), dim=1)
-        current_lpy = roboduet_current_lpy(env, ee_body_cfg)
-        current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
-        lpy_range = torch.tensor(
-            [
-                term.cfg.l_range[1] - term.cfg.l_range[0],
-                term.cfg.p_range[1] - term.cfg.p_range[0],
-                term.cfg.y_range[1] - term.cfg.y_range[0],
-            ],
-            device=env.device,
-            dtype=current_lpy.dtype,
-        ).unsqueeze(0)
-        rpy_range = torch.tensor(
-            [
-                term.cfg.roll_ee_range[1] - term.cfg.roll_ee_range[0],
-                term.cfg.pitch_ee_range[1] - term.cfg.pitch_ee_range[0],
-                term.cfg.yaw_ee_range[1] - term.cfg.yaw_ee_range[0],
-            ],
-            device=env.device,
-            dtype=current_abg.dtype,
-        ).unsqueeze(0)
-        lpy_error = torch.sum(torch.abs(current_lpy - term.commands_arm_obs[:, :3]) / lpy_range, dim=1)
-        rpy_error = torch.sum(torch.abs(current_abg - term.target_abg) / rpy_range, dim=1)
-        metrics["arm_manip_commands_tracking_combine"] = torch.exp(
-            -(manip_weight_lpy * lpy_error + manip_weight_rpy * rpy_error)
-        )
-        metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
-        metrics["arm_energy"] = torch.sum(
-            torch.square(
-                robot.data.applied_torque[:, arm_joint_cfg.joint_ids] * robot.data.joint_vel[:, arm_joint_cfg.joint_ids]
-            ),
-            dim=1,
-        )
-        prev_joint_vel = getattr(env, "_roboduet_prev_joint_vel", torch.zeros_like(robot.data.joint_vel))
-        metrics["arm_dof_acc"] = torch.sum(
-            torch.square(
-                (prev_joint_vel[:, arm_joint_cfg.joint_ids] - robot.data.joint_vel[:, arm_joint_cfg.joint_ids])
-                / env.step_dt
-            ),
-            dim=1,
-        )
-        metrics["arm_action_rate"] = torch.sum(
-            torch.square(
-                env.action_manager.prev_action[:, arm_joint_cfg.joint_ids]
-                - env.action_manager.action[:, arm_joint_cfg.joint_ids]
-            ),
-            dim=1,
-        )
-        plan_actions = getattr(env, "plan_actions", torch.zeros(env.num_envs, 2, device=env.device))
-        last_plan_actions = getattr(env, "last_plan_actions", torch.zeros_like(plan_actions))
-        metrics["arm_control_limits"] = (
-            torch.clamp(term.cfg.limit_body_pitch[0] - plan_actions[:, 0], min=0.0)
-            + torch.clamp(plan_actions[:, 0] - term.cfg.limit_body_pitch[1], min=0.0)
-            + torch.clamp(term.cfg.limit_body_roll[0] - plan_actions[:, 1], min=0.0)
-            + torch.clamp(plan_actions[:, 1] - term.cfg.limit_body_roll[1], min=0.0)
-        )
-        plan_action_valid = (last_plan_actions != 0.0).float()
-        metrics["arm_control_smoothness_1"] = torch.sum(
-            torch.square(plan_actions - last_plan_actions) * plan_action_valid,
-            dim=1,
-        )
-        metrics["dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, leg_joint_cfg.joint_ids]), dim=1)
-        metrics["dof_acc"] = torch.sum(
-            torch.square(
-                (prev_joint_vel[:, leg_joint_cfg.joint_ids] - robot.data.joint_vel[:, leg_joint_cfg.joint_ids])
-                / env.step_dt
-            ),
-            dim=1,
-        )
-        metrics["action_rate"] = torch.sum(
-            torch.square(
-                env.action_manager.prev_action[:, leg_joint_cfg.joint_ids]
-                - env.action_manager.action[:, leg_joint_cfg.joint_ids]
-            ),
-            dim=1,
-        )
-        joint_pos_target = getattr(env, "_go2arm_joint_pos_target", torch.zeros_like(env.action_manager.action))
-        last_joint_pos_target = getattr(env, "_go2arm_last_joint_pos_target", torch.zeros_like(joint_pos_target))
-        last_last_joint_pos_target = getattr(env, "_go2arm_last_last_joint_pos_target", torch.zeros_like(joint_pos_target))
-        leg_valid = (env.action_manager.prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
-        leg_valid_2 = (env.action_manager.prev_prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
-        arm_valid = (env.action_manager.prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
-        arm_valid_2 = (env.action_manager.prev_prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
-        metrics["action_smoothness_1"] = torch.sum(
-            torch.square(joint_pos_target[:, leg_joint_cfg.joint_ids] - last_joint_pos_target[:, leg_joint_cfg.joint_ids])
-            * leg_valid,
-            dim=1,
-        )
-        metrics["action_smoothness_2"] = torch.sum(
-            torch.square(
-                joint_pos_target[:, leg_joint_cfg.joint_ids]
-                - 2.0 * last_joint_pos_target[:, leg_joint_cfg.joint_ids]
-                + last_last_joint_pos_target[:, leg_joint_cfg.joint_ids]
-            )
-            * leg_valid
-            * leg_valid_2,
-            dim=1,
-        )
-        metrics["arm_action_smoothness_1"] = torch.sum(
-            torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids] - last_joint_pos_target[:, arm_joint_cfg.joint_ids])
-            * arm_valid,
-            dim=1,
-        )
-        metrics["arm_action_smoothness_2"] = torch.sum(
-            torch.square(
-                joint_pos_target[:, arm_joint_cfg.joint_ids]
-                - 2.0 * last_joint_pos_target[:, arm_joint_cfg.joint_ids]
-                + last_last_joint_pos_target[:, arm_joint_cfg.joint_ids]
-            )
-            * arm_valid
-            * arm_valid_2,
-            dim=1,
-        )
-        metrics["torques"] = torch.sum(torch.square(robot.data.applied_torque[:, leg_joint_cfg.joint_ids]), dim=1)
-        metrics["hip_action_l2"] = torch.sum(torch.square(roboduet_current_action(env)[:, [0, 3, 6, 9]]), dim=1)
-
-        for name, scale in scales.items():
-            if name not in metrics:
-                continue
-            rew = float(scale) * metrics[name]
-            reward_dog += rew
-            episode_sums[name] += rew
-            if torch.sum(rew) >= 0:
-                reward_pos_dog += rew
-            elif torch.sum(rew) <= 0:
-                reward_neg_dog += rew
-            if name not in ("tracking_lin_vel", "tracking_ang_vel"):
-                reward_arm += rew
-                if torch.sum(rew) >= 0:
-                    reward_pos_arm += rew
-                elif torch.sum(rew) <= 0:
-                    reward_neg_arm += rew
-            if name in ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel"):
-                command_value = float(scale) + rew
-            else:
-                command_value = rew
-            command_sums[name] += command_value
-            if name in GO2ARM_COMMAND_CURRICULUM_KEYS:
-                term.accumulate_metric(name, command_value)
-        if only_positive_rewards:
-            reward_dog = torch.clamp(reward_dog, min=0.0)
-            reward_arm = torch.clamp(reward_arm, min=0.0)
-        elif only_positive_rewards_ji22_style:
-            reward_dog = reward_pos_dog * torch.exp(reward_neg_dog / float(sigma_rew_neg))
-            reward_arm = reward_pos_arm * torch.exp(reward_neg_arm / float(sigma_rew_neg))
-        episode_sums["total"] += reward_dog
-        command_sums["lin_vel_raw"] += root_lin_vel_b[:, 0]
-        command_sums["ang_vel_raw"] += root_ang_vel_b[:, 2]
-        command_sums["lin_vel_residual"] += torch.square(root_lin_vel_b[:, 0] - term.commands_dog[:, 0])
-        command_sums["ang_vel_residual"] += torch.square(root_ang_vel_b[:, 2] - term.commands_dog[:, 2])
-        command_sums["ep_timesteps"] += 1.0
-        env._roboduet_reward_dog = reward_dog.detach().clone()
-        env._roboduet_reward_arm = reward_arm.detach().clone()
-        env._roboduet_prev_joint_vel = robot.data.joint_vel.detach().clone()
-        return reward_dog
+        return reward_state["reward_dog"]

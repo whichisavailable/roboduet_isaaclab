@@ -244,30 +244,41 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
+        roboduet_reward_params = {
+            "command_name": "roboduet",
+            "pretrained_scales": PRETRAINED_REWARD_SCALES,
+            "hybrid_scales": HYBRID_REWARD_SCALES,
+            "only_positive_rewards": False,
+            "only_positive_rewards_ji22_style": True,
+            "sigma_rew_neg": 0.02,
+            "tracking_sigma": 0.25,
+            "tracking_sigma_yaw": 0.25,
+            "gait_force_sigma": 100.0,
+            "gait_vel_sigma": 10.0,
+            "illegal_contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
+            "foot_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
+            "foot_asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
+            "leg_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_LEG_JOINT_NAMES, preserve_order=True),
+            "arm_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_ARM_JOINT_NAMES, preserve_order=True),
+            "base_body_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
+            "ee_body_cfg": SceneEntityCfg("robot", body_names=["link6"]),
+            "manip_weight_lpy": 3.0,
+            "manip_weight_rpy": 1.0,
+        }
+        for reward_term_name in HYBRID_REWARD_SCALES:
+            setattr(
+                self.rewards,
+                reward_term_name,
+                RewTerm(
+                    func=cast(Callable[..., object], mdp.roboduet_weighted_reward_term),
+                    weight=1.0,
+                    params={"reward_term_name": reward_term_name, **roboduet_reward_params},
+                ),
+            )
         self.rewards.total_reward = RewTerm(
-            func=cast(Callable[..., object], mdp.RoboDuetReward),
+            func=cast(Callable[..., object], mdp.roboduet_total_reward_adjustment),
             weight=1.0,
-            params={
-                "command_name": "roboduet",
-                "pretrained_scales": PRETRAINED_REWARD_SCALES,
-                "hybrid_scales": HYBRID_REWARD_SCALES,
-                "only_positive_rewards": False,
-                "only_positive_rewards_ji22_style": True,
-                "sigma_rew_neg": 0.02,
-                "tracking_sigma": 0.25,
-                "tracking_sigma_yaw": 0.25,
-                "gait_force_sigma": 100.0,
-                "gait_vel_sigma": 10.0,
-                "illegal_contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
-                "foot_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
-                "foot_asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
-                "leg_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_LEG_JOINT_NAMES, preserve_order=True),
-                "arm_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_ARM_JOINT_NAMES, preserve_order=True),
-                "base_body_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
-                "ee_body_cfg": SceneEntityCfg("robot", body_names=["link6"]),
-                "manip_weight_lpy": 3.0,
-                "manip_weight_rpy": 1.0,
-            },
+            params=roboduet_reward_params,
         )
         self.rewards.ee_tracking_potential = None
 
