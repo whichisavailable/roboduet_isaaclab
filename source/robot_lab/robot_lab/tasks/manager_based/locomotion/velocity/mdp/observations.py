@@ -33,6 +33,7 @@ GO2ARM_FOOT_SPHERE_CENTER_OFFSET_B = (
 )
 GO2ARM_FOOT_SPHERE_RADIUS = 0.022
 GO2ARM_FOOT_BODY_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
+GO2ARM_FOOT_SCANNER_NAMES = ("FL_foot_scanner", "FR_foot_scanner", "RL_foot_scanner", "RR_foot_scanner")
 GO2ARM_FOOT_SENSOR_NAMES = ("FL_foot_contact", "FR_foot_contact", "RL_foot_contact", "RR_foot_contact")
 GO2ARM_LEG_JOINT_NAMES = (
     "FL_hip_joint",

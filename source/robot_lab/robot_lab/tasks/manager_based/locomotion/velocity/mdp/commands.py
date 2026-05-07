@@ -994,6 +994,30 @@ class RoboDuetCommand(CommandTerm):
             dim=-1,
         )
 
+    def _update_command(self):
+        self._update_switch_state()
+        sample_interval = max(1, int(round(self.cfg.resampling_time_s / self._env.step_dt)))
+        env_ids = torch.where(
+            (self._env.episode_length_buf > 0) & (self._env.episode_length_buf % sample_interval == 0)
+        )[0]
+        if env_ids.numel() > 0:
+            self._resample_locomotion_commands(env_ids)
+        if self.switch_open:
+            self.arm_time += self._env.step_dt
+            env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
+            if env_ids.numel() > 0:
+                self._resample_arm_commands(env_ids)
+        self._step_contact_targets()
+        arm_command_obs = self.commands_arm_obs if self.switch_open else torch.zeros_like(self.commands_arm_obs)
+        self.command_buffer = torch.cat(
+            (
+                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
+                arm_command_obs,
+                self.clock_inputs,
+            ),
+            dim=-1,
+        )
+
     def _resample_locomotion_commands(self, env_ids: torch.Tensor, allow_curriculum_update: bool = True) -> None:
         if env_ids.numel() == 0:
             return
