@@ -1,5 +1,5 @@
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
+from isaaclab.managers import SceneEntityCfg
 from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import (
     GO2ARM_BASE_BODY_NAME,
     GO2ARM_FOOT_BODY_NAMES,

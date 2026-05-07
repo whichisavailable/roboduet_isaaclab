@@ -63,18 +63,6 @@ class RoboDuetDogPrivilegedObsCfg(ObsGroup):
         func=mdp.roboduet_privileged_restitution,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True)},
     )
-    base_mass = ObsTerm(
-        func=mdp.base_mass_disturbance,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME])},
-    )
-    lpy = ObsTerm(
-        func=mdp.roboduet_current_lpy,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link6"])},
-    )
-    ee_quat_in_base = ObsTerm(
-        func=mdp.roboduet_current_ee_quat_in_base,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=["link6"])},
-    )
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -108,10 +96,6 @@ class RoboDuetArmPrivilegedObsCfg(ObsGroup):
     restitution = ObsTerm(
         func=mdp.roboduet_privileged_restitution,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True)},
-    )
-    base_mass = ObsTerm(
-        func=mdp.base_mass_disturbance,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME])},
     )
     lpy = ObsTerm(
         func=mdp.roboduet_current_lpy,
@@ -212,7 +196,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.observations.arm_policy = RoboDuetArmPolicyObsCfg()
         self.observations.arm_privileged = RoboDuetArmPrivilegedObsCfg()
         self.observations.critic = None
-        self.observations.privileged = RoboDuetDogPrivilegedObsCfg()
+        self.observations.privileged = RoboDuetArmPrivilegedObsCfg()
 
         self.actions.joint_pos = Go2ArmDefaultDeltaJointPositionActionCfg(
             asset_name="robot",
@@ -304,7 +288,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
-                "mass_distribution_params": (-1.0, 3.0),
+                "mass_distribution_params": (-2.0, 2.0),
                 "operation": "add",
                 "recompute_inertia": True,
             },
@@ -324,16 +308,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "pitch": (-0.5, 0.5),
             "yaw": (-0.5, 0.5),
         }
-        self.events.randomize_gravity = EventTerm(
-            func=mdp.randomize_physics_scene_gravity,
-            mode="interval",
-            interval_range_s=(8.0, 8.0),
-            params={
-                "gravity_distribution_params": ([-1.0, -1.0, -10.8], [1.0, 1.0, -8.8]),
-                "operation": "abs",
-                "distribution": "uniform",
-            },
-        )
+        self.events.randomize_gravity = None
 
         self.terminations.time_out = DoneTerm(func=mdp.time_out, time_out=True)
         self.terminations.terrain_out_of_bounds = None

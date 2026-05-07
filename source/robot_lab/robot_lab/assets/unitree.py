@@ -42,8 +42,10 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.4),  # root position
         joint_pos={
-            ".*_hip_joint": 0.0,
-            ".*_thigh_joint": 0.8,
+            ".*L_hip_joint": 0.1,
+            ".*R_hip_joint": -0.1,
+            "F.*_thigh_joint": 0.8,
+            "R.*_thigh_joint": 1.0,
             ".*_calf_joint": -1.5,
             # Piper arm joints (joint1..joint6)
             # Avoid initializing at one-sided joint limits (joint2: [0, pi], joint3: [-2.967, 0]),
@@ -64,27 +66,21 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
     # - calf: 4 个腿部关节（*_calf_joint）
     # - upper: 6 个机械臂关节（joint1..joint6）
     actuators={
-        "leg_hip_thigh": DelayedPDActuatorCfg(
+        "leg_hip_thigh": DCMotorCfg(
             joint_names_expr=[r".*_hip_joint", r".*_thigh_joint"],
             effort_limit=23.7,
             velocity_limit=30.1,
-            stiffness=25.0,
-            damping=0.5,
+            stiffness=35.0,
+            damping=1.0,
             friction=0.0,
-            # armature=0.01,
-            # min_delay=JOINT_MIN_DELAY_STEP,
-            # max_delay=JOINT_MAX_DELAY_STEP,
         ),
-        "leg_calf": DelayedPDActuatorCfg(
+        "leg_calf": DCMotorCfg(
             joint_names_expr=[r".*_calf_joint"],
             effort_limit=45.43,
             velocity_limit=15.70,
-            stiffness=25.0,
-            damping=0.5,
+            stiffness=35.0,
+            damping=1.0,
             friction=0.0,
-            # armature=0.01,
-            # min_delay=JOINT_MIN_DELAY_STEP,
-            # max_delay=JOINT_MAX_DELAY_STEP,
         ),
         "arm": DelayedPDActuatorCfg(
             joint_names_expr=[r"joint[1-6]"],
