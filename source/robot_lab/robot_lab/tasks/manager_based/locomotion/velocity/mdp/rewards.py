@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 from .observations import (
     GO2ARM_COMMAND_CURRICULUM_KEYS,
     GO2ARM_FOOT_BODY_NAMES,
+    GO2ARM_FOOT_SCANNER_NAMES,
     GO2ARM_FOOT_SENSOR_NAMES,
     GO2ARM_FOOT_SPHERE_RADIUS,
     _get_go2arm_foot_kinematics,
@@ -3089,7 +3090,7 @@ def _compute_roboduet_reward_state(
         dim=1,
     )
     phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
-    ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SENSOR_NAMES)
+    ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SCANNER_NAMES)
     contact_point_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2] - 0.022
     ground_height = torch.where(ground_height_data["is_valid"], ground_height_data["ground_height_w"], contact_point_height)
     foot_height = contact_point_height - ground_height

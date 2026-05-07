@@ -190,7 +190,11 @@ def _get_go2arm_ground_height_data(
     ground_height_values: list[torch.Tensor] = []
     valid_masks: list[torch.Tensor] = []
     for sensor_name in sensor_names:
-        sensor: RayCaster = env.scene.sensors[sensor_name]
+        sensor = env.scene.sensors.get(sensor_name)
+        if not isinstance(sensor, RayCaster):
+            ground_height_values.append(torch.zeros(env.num_envs, device=env.device, dtype=torch.float32))
+            valid_masks.append(torch.zeros(env.num_envs, device=env.device, dtype=torch.bool))
+            continue
         ray_hits_z = sensor.data.ray_hits_w[..., 2]
         ground_height_values.append(torch.mean(ray_hits_z, dim=1))
         valid_masks.append(
