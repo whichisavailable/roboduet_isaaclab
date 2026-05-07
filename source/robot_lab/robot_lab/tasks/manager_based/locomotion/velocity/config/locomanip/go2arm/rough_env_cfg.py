@@ -269,6 +269,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "manip_weight_rpy": 1.0,
             },
         )
+        self.rewards.ee_tracking_potential = None
 
         self.events.randomize_rigid_body_material = EventTerm(
             func=mdp.randomize_rigid_body_material,

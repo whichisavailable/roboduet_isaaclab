@@ -443,4 +443,4 @@ def roboduet_stage_switch(
     del env_ids
     term = env.command_manager.get_term(command_name)
     term._update_switch_state()
-    return torch.full((env.num_envs,), 1.0 if term.switch_open else 0.0, device=env.device)
+    return torch.tensor(1.0 if term.switch_open else 0.0, device=env.device)

@@ -36,6 +36,14 @@ from .observations import (
     roboduet_current_lpy,
 )
 
+_ROBODUET_COMMAND_LOG_EXTRA_KEYS = (
+    "lin_vel_raw",
+    "ang_vel_raw",
+    "lin_vel_residual",
+    "ang_vel_residual",
+    "ep_timesteps",
+)
+
 
 def _ee_pose_command_term(env: ManagerBasedRLEnv, command_name: str):
     """Return the ee-pose command term used by go2arm."""
@@ -61,6 +69,26 @@ def _get_go2arm_potential_term_cfg(env: ManagerBasedRLEnv):
         cached = env.reward_manager.get_term_cfg("ee_tracking_potential")
         env._go2arm_potential_term_cfg = cached
     return cached
+
+
+def _ensure_roboduet_logging_buffers(
+    env: ManagerBasedRLEnv, hybrid_scales: dict[str, float]
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    reward_names = tuple(hybrid_scales.keys())
+    expected_command_names = reward_names + _ROBODUET_COMMAND_LOG_EXTRA_KEYS
+    if getattr(env, "_roboduet_reward_term_names", None) != reward_names:
+        env._roboduet_reward_term_names = reward_names
+        env._roboduet_episode_sums = {
+            name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device) for name in reward_names
+        }
+        env._roboduet_episode_sums["total"] = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+    if getattr(env, "_roboduet_command_term_names", None) != expected_command_names:
+        env._roboduet_command_term_names = expected_command_names
+        env._roboduet_command_sums = {
+            name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+            for name in expected_command_names
+        }
+    return env._roboduet_episode_sums, env._roboduet_command_sums
 
 
 def _get_go2arm_support_contact_stats(
@@ -2982,6 +3010,7 @@ class RoboDuetReward(ManagerTermBase):
         del base_body_cfg
         term = env.command_manager.get_term(command_name)
         scales = hybrid_scales if term.switch_open else pretrained_scales
+        episode_sums, command_sums = _ensure_roboduet_logging_buffers(env, hybrid_scales)
         robot: Articulation = env.scene["robot"]
         reward_dog = torch.zeros(env.num_envs, device=env.device)
         reward_arm = torch.zeros(env.num_envs, device=env.device)
@@ -3173,6 +3202,7 @@ class RoboDuetReward(ManagerTermBase):
                 continue
             rew = float(scale) * metrics[name]
             reward_dog += rew
+            episode_sums[name] += rew
             if torch.sum(rew) >= 0:
                 reward_pos_dog += rew
             elif torch.sum(rew) <= 0:
@@ -3183,17 +3213,25 @@ class RoboDuetReward(ManagerTermBase):
                     reward_pos_arm += rew
                 elif torch.sum(rew) <= 0:
                     reward_neg_arm += rew
+            if name in ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel"):
+                command_value = float(scale) + rew
+            else:
+                command_value = rew
+            command_sums[name] += command_value
             if name in GO2ARM_COMMAND_CURRICULUM_KEYS:
-                if name in ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel"):
-                    term.accumulate_metric(name, float(scale) + rew)
-                else:
-                    term.accumulate_metric(name, rew)
+                term.accumulate_metric(name, command_value)
         if only_positive_rewards:
             reward_dog = torch.clamp(reward_dog, min=0.0)
             reward_arm = torch.clamp(reward_arm, min=0.0)
         elif only_positive_rewards_ji22_style:
             reward_dog = reward_pos_dog * torch.exp(reward_neg_dog / float(sigma_rew_neg))
             reward_arm = reward_pos_arm * torch.exp(reward_neg_arm / float(sigma_rew_neg))
+        episode_sums["total"] += reward_dog
+        command_sums["lin_vel_raw"] += root_lin_vel_b[:, 0]
+        command_sums["ang_vel_raw"] += root_ang_vel_b[:, 2]
+        command_sums["lin_vel_residual"] += torch.square(root_lin_vel_b[:, 0] - term.commands_dog[:, 0])
+        command_sums["ang_vel_residual"] += torch.square(root_ang_vel_b[:, 2] - term.commands_dog[:, 2])
+        command_sums["ep_timesteps"] += 1.0
         env._roboduet_reward_dog = reward_dog.detach().clone()
         env._roboduet_reward_arm = reward_arm.detach().clone()
         env._roboduet_prev_joint_vel = robot.data.joint_vel.detach().clone()

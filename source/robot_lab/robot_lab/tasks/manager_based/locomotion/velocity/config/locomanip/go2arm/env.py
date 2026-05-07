@@ -252,6 +252,27 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             episode_dict[key] = mean_value
         self._accumulate_log_only(key, sum_value, count=float(valid_count))
 
+    def _log_roboduet_reward_terms(
+        self, episode_dict: dict[str, float | torch.Tensor], done_mask: torch.Tensor
+    ) -> None:
+        if not torch.any(done_mask):
+            return
+        episode_sums = getattr(self, "_roboduet_episode_sums", None)
+        if not isinstance(episode_sums, dict):
+            return
+        done_ids = torch.where(done_mask)[0]
+        reward_names = tuple(getattr(self, "_roboduet_reward_term_names", ()))
+        for name in reward_names + ("total",):
+            if name not in episode_sums:
+                continue
+            values = episode_sums[name][done_ids]
+            self._accumulate_tensor_mean_log(episode_dict, f"rew_{name}", values, write_episode=True)
+            episode_sums[name][done_ids] = 0.0
+        command_sums = getattr(self, "_roboduet_command_sums", None)
+        if isinstance(command_sums, dict):
+            for values in command_sums.values():
+                values[done_ids] = 0.0
+
     def _command_term(self, command_name: str | None = None):
         if command_name is not None:
             return self.command_manager.get_term(command_name)
@@ -704,7 +725,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
 
         reward_term_name = "total_reward"
         terminal_tracking_errors = None
-        if self._enable_debug_reward_logging and reward_term_name in self.reward_manager.active_terms:
+        if reward_term_name in self.reward_manager.active_terms and hasattr(self, "_roboduet_episode_sums"):
+            self._log_roboduet_reward_terms(episode_dict, done_mask)
+        elif self._enable_debug_reward_logging and reward_term_name in self.reward_manager.active_terms:
             debug_terms = mdp.go2arm_reward_debug_terms(self, total_reward_term_name=reward_term_name)
             gate = debug_terms.get("gate_d")
             gate_low_mask = gate < 0.1 if gate is not None else None
