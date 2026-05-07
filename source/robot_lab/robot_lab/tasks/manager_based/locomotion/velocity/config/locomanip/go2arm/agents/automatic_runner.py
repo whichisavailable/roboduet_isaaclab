@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from types import SimpleNamespace
 
 import torch
@@ -106,6 +107,7 @@ class RoboDuetAutomaticRunner:
         self.current_learning_iteration = 0
         self.git_status_repos: list[str] = []
         self.export_deploy_models = bool(self.cfg.get("roboduet_export_deploy_models", True))
+        self.log_interval = max(1, int(self.cfg.get("log_interval", 1)))
 
         obs = self.env.get_observations()
         self.dog_obs_dim = int(obs["dog_policy"].shape[-1])
@@ -187,7 +189,16 @@ class RoboDuetAutomaticRunner:
         # keep a minimal compatibility surface for play/export code that inspects runner.alg.policy
         self.alg = SimpleNamespace(policy=self.inference_policy)
 
+        print(
+            "[INFO] RoboDuet runner initialized: "
+            f"num_envs={self.env.num_envs}, "
+            f"num_steps_per_env={int(self.cfg['num_steps_per_env'])}, "
+            f"save_interval={int(self.cfg['save_interval'])}, "
+            f"log_interval={self.log_interval}"
+        )
+        reset_start_time = time.perf_counter()
         self.env.reset()
+        print(f"[INFO] RoboDuet runner env.reset() finished in {time.perf_counter() - reset_start_time:.2f}s.")
 
     def add_git_repo_to_log(self, repo_file_path: str) -> None:
         self.git_status_repos.append(repo_file_path)
@@ -300,7 +311,15 @@ class RoboDuetAutomaticRunner:
         num_steps_per_env = int(self.cfg["num_steps_per_env"])
 
         total_it = self.current_learning_iteration + num_learning_iterations
+        print(
+            "[INFO] Starting RoboDuet training: "
+            f"start_iteration={self.current_learning_iteration}, "
+            f"total_iterations={total_it}, "
+            f"num_steps_per_env={num_steps_per_env}, "
+            f"switch_open={self._command_term().switch_open}"
+        )
         for it in range(self.current_learning_iteration, total_it):
+            iteration_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):
                     if self._command_term().switch_open:
@@ -332,14 +351,32 @@ class RoboDuetAutomaticRunner:
                     done_env_ids = dones.nonzero(as_tuple=False).flatten()
                     self._clear_cached(done_env_ids)
 
+                rollout_duration = time.perf_counter() - iteration_start_time
                 if self._command_term().switch_open:
                     self.alg_arm.compute_returns(arm_obs_dict["obs_history"], arm_obs_dict["privileged_obs"])
                 self.alg_dog.compute_returns(dog_obs_dict["obs_history"], dog_obs_dict["privileged_obs"])
 
+            update_start_time = time.perf_counter()
             if self._command_term().switch_open:
                 self.alg_arm.update(un_adapt=False)
             self.alg_dog.update()
+            update_duration = time.perf_counter() - update_start_time
             self.current_learning_iteration = it + 1
+            iteration_duration = time.perf_counter() - iteration_start_time
+
+            if (
+                self.current_learning_iteration == 1
+                or self.current_learning_iteration % self.log_interval == 0
+                or self.current_learning_iteration == total_it
+            ):
+                print(
+                    "[INFO] RoboDuet iteration "
+                    f"{self.current_learning_iteration}/{total_it}: "
+                    f"rollout={rollout_duration:.2f}s, "
+                    f"update={update_duration:.2f}s, "
+                    f"total={iteration_duration:.2f}s, "
+                    f"switch_open={self._command_term().switch_open}"
+                )
 
             if self.log_dir is not None and self.current_learning_iteration % int(self.cfg["save_interval"]) == 0:
                 self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))

@@ -75,6 +75,7 @@ class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlBaseRunnerCfg):
     num_steps_per_env: int = 24
     max_iterations: int = 100000
     save_interval: int = 400
+    log_interval: int = 1
     empirical_normalization: bool = False
     experiment_name: str = "roboduet_go2arm_rough"
     run_name: str = ""
