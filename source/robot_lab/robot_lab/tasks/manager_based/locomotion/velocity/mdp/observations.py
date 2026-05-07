@@ -817,7 +817,13 @@ def _material_shape_indices(
 def _material_values_are_static(env: ManagerBasedEnv) -> bool:
     events_cfg = getattr(getattr(env, "cfg", None), "events", None)
     material_event_cfg = getattr(events_cfg, "randomize_rigid_body_material", None)
-    return material_event_cfg is not None and getattr(material_event_cfg, "mode", None) == "startup"
+    # ObservationManager probes term dimensions before RL startup events run. Only cache values
+    # after the RL managers exist, so the first cached value is post-startup randomization.
+    return (
+        material_event_cfg is not None
+        and getattr(material_event_cfg, "mode", None) == "startup"
+        and hasattr(env, "reward_manager")
+    )
 
 
 def _material_property(
