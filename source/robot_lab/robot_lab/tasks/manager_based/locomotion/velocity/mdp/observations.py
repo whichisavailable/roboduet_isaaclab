@@ -10,7 +10,14 @@ import torch
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
-from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse, subtract_frame_transforms
+from isaaclab.utils.math import (
+    matrix_from_quat,
+    quat_apply,
+    quat_apply_inverse,
+    quat_conjugate,
+    quat_mul,
+    subtract_frame_transforms,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
@@ -27,6 +34,30 @@ GO2ARM_FOOT_SPHERE_CENTER_OFFSET_B = (
 GO2ARM_FOOT_SPHERE_RADIUS = 0.022
 GO2ARM_FOOT_BODY_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
 GO2ARM_FOOT_SENSOR_NAMES = ("FL_foot_contact", "FR_foot_contact", "RL_foot_contact", "RR_foot_contact")
+GO2ARM_LEG_JOINT_NAMES = (
+    "FL_hip_joint",
+    "FL_thigh_joint",
+    "FL_calf_joint",
+    "FR_hip_joint",
+    "FR_thigh_joint",
+    "FR_calf_joint",
+    "RL_hip_joint",
+    "RL_thigh_joint",
+    "RL_calf_joint",
+    "RR_hip_joint",
+    "RR_thigh_joint",
+    "RR_calf_joint",
+)
+GO2ARM_ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+GO2ARM_ALL_JOINT_NAMES = GO2ARM_LEG_JOINT_NAMES + GO2ARM_ARM_JOINT_NAMES
+GO2ARM_BASE_BODY_NAME = "base_link"
+GO2ARM_EE_BODY_NAME = "link6"
+GO2ARM_COMMAND_CURRICULUM_KEYS = (
+    "tracking_lin_vel",
+    "tracking_ang_vel",
+    "tracking_contacts_shaped_force",
+    "tracking_contacts_shaped_vel",
+)
 _GO2ARM_FOOT_OFFSETS_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
 _GO2ARM_PHASE_OFFSETS_CACHE: dict[tuple[torch.device, torch.dtype, tuple[float, ...]], torch.Tensor] = {}
 
@@ -47,6 +78,44 @@ def _go2arm_phase_offsets(device: torch.device, dtype: torch.dtype, phase_offset
     if cache_key not in _GO2ARM_PHASE_OFFSETS_CACHE:
         _GO2ARM_PHASE_OFFSETS_CACHE[cache_key] = torch.tensor(phase_offsets, device=device, dtype=dtype).unsqueeze(0)
     return _GO2ARM_PHASE_OFFSETS_CACHE[cache_key]
+
+
+def _get_command_term(env: ManagerBasedEnv, command_name: str):
+    return env.command_manager.get_term(command_name)
+
+
+def _quat_to_roll_pitch(quat_wxyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    w, x, y, z = quat_wxyz.unbind(dim=-1)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = torch.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = torch.atan2(sinp, torch.sqrt(torch.clamp(1.0 - sinp * sinp, min=1.0e-8)))
+    return roll, pitch
+
+
+def _body_yaw_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    forward = quat_apply(
+        quat_wxyz,
+        torch.tensor([1.0, 0.0, 0.0], device=quat_wxyz.device, dtype=quat_wxyz.dtype).expand(quat_wxyz.shape[0], 3),
+    )
+    yaw = torch.atan2(forward[:, 1], forward[:, 0])
+    zeros = torch.zeros_like(yaw)
+    half_yaw = 0.5 * yaw
+    return torch.stack((torch.cos(half_yaw), zeros, zeros, torch.sin(half_yaw)), dim=-1)
+
+
+def _quat_to_abg(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    x_axis = torch.tensor([1.0, 0.0, 0.0], device=quat_wxyz.device, dtype=quat_wxyz.dtype).expand(quat_wxyz.shape[0], 3)
+    y_axis = torch.tensor([0.0, 1.0, 0.0], device=quat_wxyz.device, dtype=quat_wxyz.dtype).expand(quat_wxyz.shape[0], 3)
+    z_axis = torch.tensor([0.0, 0.0, 1.0], device=quat_wxyz.device, dtype=quat_wxyz.dtype).expand(quat_wxyz.shape[0], 3)
+    roll_vec = quat_apply(quat_wxyz, y_axis)
+    pitch_vec = quat_apply(quat_wxyz, z_axis)
+    yaw_vec = quat_apply(quat_wxyz, x_axis)
+    alpha = torch.atan2(roll_vec[:, 2], roll_vec[:, 1])
+    beta = torch.atan2(pitch_vec[:, 0], pitch_vec[:, 2])
+    gamma = torch.atan2(yaw_vec[:, 1], yaw_vec[:, 0])
+    return torch.stack((alpha, beta, gamma), dim=-1)
 
 
 def get_go2arm_foot_sphere_centers_from_bodies(asset: Articulation, body_ids: list[int] | torch.Tensor) -> torch.Tensor:
@@ -655,3 +724,120 @@ def observation_delay(
     if delay_value.ndim == 1:
         delay_value = delay_value.unsqueeze(-1)
     return delay_value
+
+
+def roboduet_joint_vel_loco(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_vel[:, asset_cfg.joint_ids]
+
+
+def roboduet_current_action(env: ManagerBasedEnv) -> torch.Tensor:
+    # Roboduet `auto_train` 观测和奖励都读取“实际执行后的动作”，不是原始策略输出。
+    return getattr(env, "_go2arm_effective_action", env.action_manager.action)
+
+
+def roboduet_leg_joint_pos_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+
+def roboduet_arm_joint_pos_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+
+def roboduet_leg_action(env: ManagerBasedEnv) -> torch.Tensor:
+    return roboduet_current_action(env)[:, :12]
+
+
+def roboduet_arm_action(env: ManagerBasedEnv) -> torch.Tensor:
+    return roboduet_current_action(env)[:, 12:18]
+
+
+def roboduet_commands_dog(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    term = _get_command_term(env, command_name)
+    return term.commands_dog[:, :3] * term.commands_scale_dog[:, :3]
+
+
+def roboduet_commands_dog_policy(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    term = _get_command_term(env, command_name)
+    return term.commands_dog * term.commands_scale_dog
+
+
+def roboduet_commands_arm_obs(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    term = _get_command_term(env, command_name)
+    if term.switch_open:
+        return term.commands_arm_obs
+    return torch.zeros_like(term.commands_arm_obs)
+
+
+def roboduet_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    roll, pitch = _quat_to_roll_pitch(asset.data.root_quat_w)
+    return torch.stack((roll, pitch), dim=-1)
+
+
+def roboduet_clock_inputs(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    return _get_command_term(env, command_name).clock_inputs
+
+
+def _material_property(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg, material_index: int, reduce_mean: bool = True
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    materials = asset.root_physx_view.get_material_properties()
+    body_ids = asset_cfg.body_ids
+    if isinstance(body_ids, slice):
+        body_ids = list(range(*body_ids.indices(asset.num_bodies)))
+    num_shapes_per_body = []
+    for link_path in asset.root_physx_view.link_paths[0]:
+        link_physx_view = asset._physics_sim_view.create_rigid_body_view(link_path)
+        num_shapes_per_body.append(link_physx_view.max_shapes)
+    values = []
+    for body_id in body_ids:
+        shape_idx = sum(num_shapes_per_body[: body_id + 1]) - 1
+        values.append(materials[:, shape_idx, material_index])
+    stacked = torch.stack(values, dim=1).to(asset.device)
+    return torch.mean(stacked, dim=1, keepdim=True) if reduce_mean else stacked
+
+
+def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    return _material_property(env, asset_cfg, material_index=0)
+
+
+def roboduet_privileged_restitution(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    return _material_property(env, asset_cfg, material_index=2)
+
+
+def _ground_height_under_base(env: ManagerBasedEnv) -> torch.Tensor:
+    if "height_scanner_base" not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors["height_scanner_base"]
+    ray_hits = sensor.data.ray_hits_w[..., 2]
+    if torch.isnan(ray_hits).any() or torch.isinf(ray_hits).any() or torch.max(torch.abs(ray_hits)) > 1.0e6:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.mean(ray_hits, dim=1)
+
+
+def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    ee_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    ee_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    root_pos_w = asset.data.root_pos_w
+    yaw_quat = _body_yaw_quat(asset.data.root_quat_w)
+    grasper_offset_b = torch.tensor([0.1, 0.0, 0.0], device=env.device, dtype=ee_pos_w.dtype).expand(env.num_envs, 3)
+    grasper_offset_w = quat_apply(ee_quat_w, grasper_offset_b)
+    grasper_world = ee_pos_w + grasper_offset_w
+    delta_world = grasper_world - root_pos_w
+    delta_yaw = quat_apply_inverse(yaw_quat, delta_world)
+    delta_yaw[:, 2] = grasper_world[:, 2] - _ground_height_under_base(env) - 0.38
+    l = torch.linalg.norm(delta_yaw, dim=1)
+    p = torch.atan2(delta_yaw[:, 2], torch.sqrt(torch.clamp(delta_yaw[:, 0] ** 2 + delta_yaw[:, 1] ** 2, min=1.0e-8)))
+    yaw = torch.atan2(delta_yaw[:, 1], delta_yaw[:, 0])
+    return torch.stack((l, p, yaw), dim=-1)
+
+
+def roboduet_current_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    yaw_quat = _body_yaw_quat(asset.data.root_quat_w)
+    return quat_mul(quat_conjugate(yaw_quat), asset.data.body_quat_w[:, asset_cfg.body_ids[0]])

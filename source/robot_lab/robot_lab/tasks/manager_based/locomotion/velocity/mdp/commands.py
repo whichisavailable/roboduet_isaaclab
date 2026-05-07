@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import MISSING
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from isaaclab.assets import Articulation
@@ -16,6 +18,12 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_from_euler_xy
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
+from .observations import (
+    GO2ARM_BASE_BODY_NAME,
+    GO2ARM_COMMAND_CURRICULUM_KEYS,
+    GO2ARM_EE_BODY_NAME,
+    _quat_to_abg,
+)
 from .utils import is_robot_on_terrain
 
 if TYPE_CHECKING:
@@ -736,3 +744,349 @@ class EndEffectorPoseCommandCfg(CommandTermCfg):
     cumulative_error_gating_mu: float = 1.5
     # 累积误差每步增量的门控尺度。
     cumulative_error_gating_l: float = 1.0
+
+
+class RewardThresholdCurriculum:
+    def __init__(self, seed: int, **key_ranges):
+        self.rng = np.random.RandomState(seed)
+        self.cfg = {}
+        indices = {}
+        for key, v_range in key_ranges.items():
+            bin_size = (v_range[1] - v_range[0]) / v_range[2]
+            self.cfg[key] = np.linspace(v_range[0] + bin_size / 2.0, v_range[1] - bin_size / 2.0, v_range[2])
+            indices[key] = np.linspace(0, v_range[2] - 1, v_range[2])
+        self.bin_sizes = {key: (v_range[1] - v_range[0]) / v_range[2] for key, v_range in key_ranges.items()}
+        raw_grid = np.stack(np.meshgrid(*self.cfg.values(), indexing="ij"))
+        idx_grid = np.stack(np.meshgrid(*indices.values(), indexing="ij"))
+        self.keys = [*key_ranges.keys()]
+        self.grid = raw_grid.reshape([len(self.keys), -1])
+        self.idx_grid = idx_grid.reshape([len(self.keys), -1])
+        self.indices = np.arange(len(self.grid[0]))
+        self.weights = np.zeros(len(self.indices), dtype=np.float64)
+
+    def set_to(self, low: np.ndarray, high: np.ndarray, value: float = 1.0) -> None:
+        mask = np.logical_and(self.grid >= low[:, None], self.grid <= high[:, None]).all(axis=0)
+        if not np.any(mask):
+            raise ValueError("Command curriculum initialized with an empty domain.")
+        self.weights[mask] = value
+
+    def get_local_bins(self, bin_inds: np.ndarray, ranges: float | np.ndarray = 0.1) -> np.ndarray:
+        if isinstance(ranges, float):
+            ranges = np.ones(self.grid.shape[0]) * ranges
+        bin_inds = bin_inds.reshape(-1)
+        return np.logical_and(
+            self.grid[:, None, :].repeat(bin_inds.shape[0], axis=1)
+            >= self.grid[:, bin_inds, None] - ranges.reshape(-1, 1, 1),
+            self.grid[:, None, :].repeat(bin_inds.shape[0], axis=1)
+            <= self.grid[:, bin_inds, None] + ranges.reshape(-1, 1, 1),
+        ).all(axis=0)
+
+    def update(
+        self,
+        bin_inds: np.ndarray,
+        task_rewards: list[torch.Tensor],
+        success_thresholds: list[float],
+        local_range: float | np.ndarray = 0.5,
+    ) -> None:
+        if len(bin_inds) == 0 or len(success_thresholds) == 0:
+            return
+        is_success = np.ones(len(bin_inds), dtype=bool)
+        for task_reward, success_threshold in zip(task_rewards, success_thresholds, strict=True):
+            is_success &= np.asarray((task_reward > success_threshold).detach().cpu(), dtype=bool)
+        success_bins = bin_inds[is_success]
+        if len(success_bins) == 0:
+            return
+        self.weights[success_bins] = np.clip(self.weights[success_bins] + 0.2, 0.0, 1.0)
+        adjacents = self.get_local_bins(success_bins, ranges=local_range)
+        for adjacent in adjacents:
+            adjacent_inds = np.asarray(adjacent.nonzero()[0], dtype=np.int64)
+            self.weights[adjacent_inds] = np.clip(self.weights[adjacent_inds] + 0.2, 0.0, 1.0)
+
+    def _sample_bins(self, batch_size: int) -> tuple[np.ndarray, np.ndarray]:
+        weights = self.weights / self.weights.sum()
+        inds = self.rng.choice(self.indices, batch_size, p=weights)
+        return self.grid.T[inds], inds
+
+    def sample(self, batch_size: int) -> tuple[np.ndarray, np.ndarray]:
+        centroids, inds = self._sample_bins(batch_size)
+        bin_sizes = np.array([*self.bin_sizes.values()])
+        low = centroids - bin_sizes / 2.0
+        high = centroids + bin_sizes / 2.0
+        return self.rng.uniform(low, high), inds
+
+
+@configclass
+class RoboDuetCommandCfg(CommandTermCfg):
+    """Roboduet 原版联合 locomotion-manipulation 命令配置。"""
+
+    class_type: type = MISSING
+    asset_name: str = "robot"
+    base_body_name: str = GO2ARM_BASE_BODY_NAME
+    ee_body_name: str = GO2ARM_EE_BODY_NAME
+    resampling_time_s: float = 10.0
+    command_curriculum_seed: int = 100
+    switch_iteration: int = 10000
+    steps_per_iteration: int = 24
+    lin_vel_x: tuple[float, float] = (-1.0, 1.0)
+    lin_vel_y: tuple[float, float] = (-0.6, 0.6)
+    ang_vel_yaw: tuple[float, float] = (-1.0, 1.0)
+    body_pitch_range: tuple[float, float] = (-0.4, 0.4)
+    body_roll_range: tuple[float, float] = (0.0, 0.0)
+    limit_vel_x: tuple[float, float] = (-5.0, 5.0)
+    limit_vel_y: tuple[float, float] = (-0.6, 0.6)
+    limit_vel_yaw: tuple[float, float] = (-5.0, 5.0)
+    limit_body_pitch: tuple[float, float] = (-0.4, 0.4)
+    limit_body_roll: tuple[float, float] = (0.0, 0.0)
+    num_bins_vel_x: int = 21
+    num_bins_vel_y: int = 1
+    num_bins_vel_yaw: int = 21
+    num_bins_body_pitch: int = 1
+    num_bins_body_roll: int = 1
+    curriculum_thresholds: dict[str, float] = {
+        "tracking_lin_vel": 0.8,
+        "tracking_ang_vel": 0.5,
+        "tracking_contacts_shaped_force": 0.8,
+        "tracking_contacts_shaped_vel": 0.8,
+    }
+    pretrained_reward_scales: dict[str, float] = {
+        "tracking_lin_vel": 1.0,
+        "tracking_ang_vel": 0.5,
+        "tracking_contacts_shaped_force": 4.0,
+        "tracking_contacts_shaped_vel": 4.0,
+    }
+    l_range: tuple[float, float] = (0.3, 0.77)
+    p_range: tuple[float, float] = (-math.pi * 0.45, math.pi * 0.45)
+    y_range: tuple[float, float] = (-math.pi / 2.0, math.pi / 2.0)
+    roll_ee_range: tuple[float, float] = (-math.pi * 0.45, math.pi * 0.45)
+    pitch_ee_range: tuple[float, float] = (-math.radians(60.0), math.radians(60.0))
+    yaw_ee_range: tuple[float, float] = (-math.radians(75.0), math.radians(75.0))
+    traj_time_range: tuple[float, float] = (2.0, 3.0)
+    gait_frequency: float = 3.0
+    gait_duration: float = 0.5
+    gait_kappa: float = 0.07
+    commands_scale_dog: tuple[float, float, float, float, float] = (1.0, 1.0, 1.0, 1.0, 1.0)
+
+
+class RoboDuetCommand(CommandTerm):
+    """按原 Roboduet 逻辑同时维护底盘命令、机械臂目标和 gait 时钟。"""
+
+    cfg: RoboDuetCommandCfg
+
+    def __init__(self, cfg: RoboDuetCommandCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self.robot: Articulation = env.scene[cfg.asset_name]
+        self.base_body_idx = self.robot.body_names.index(cfg.base_body_name)
+        self.ee_body_idx = self.robot.body_names.index(cfg.ee_body_name)
+        self.command_buffer = torch.zeros(self.num_envs, 11, device=self.device)
+        self.commands_dog = torch.zeros(self.num_envs, 5, device=self.device)
+        self.commands_arm = torch.zeros(self.num_envs, 3, device=self.device)
+        self.commands_arm_obs = torch.zeros(self.num_envs, 6, device=self.device)
+        self.target_abg = torch.zeros(self.num_envs, 3, device=self.device)
+        self.obj_quats = torch.zeros(self.num_envs, 4, device=self.device)
+        self.obj_quats[:, 0] = 1.0
+        self.T_trajs = torch.full((self.num_envs,), cfg.traj_time_range[0], device=self.device)
+        self.arm_time = torch.zeros(self.num_envs, device=self.device)
+        self.gait_indices = torch.zeros(self.num_envs, device=self.device)
+        self.foot_indices = torch.zeros(self.num_envs, 4, device=self.device)
+        self.clock_inputs = torch.zeros(self.num_envs, 4, device=self.device)
+        self.desired_contact_states = torch.zeros(self.num_envs, 4, device=self.device)
+        self.command_sums = {
+            key: torch.zeros(self.num_envs, device=self.device) for key in GO2ARM_COMMAND_CURRICULUM_KEYS
+        }
+        self.commands_scale_dog = torch.tensor(cfg.commands_scale_dog, device=self.device).unsqueeze(0)
+        # `switch_open=False` 时只训练/采样 locomotion；打开后再开始采样机械臂目标。
+        self.switch_open = False
+        self._curriculum = RewardThresholdCurriculum(
+            seed=cfg.command_curriculum_seed,
+            x_vel=(cfg.limit_vel_x[0], cfg.limit_vel_x[1], cfg.num_bins_vel_x),
+            y_vel=(cfg.limit_vel_y[0], cfg.limit_vel_y[1], cfg.num_bins_vel_y),
+            yaw_vel=(cfg.limit_vel_yaw[0], cfg.limit_vel_yaw[1], cfg.num_bins_vel_yaw),
+            body_pitch=(cfg.limit_body_pitch[0], cfg.limit_body_pitch[1], cfg.num_bins_body_pitch),
+            body_roll=(cfg.limit_body_roll[0], cfg.limit_body_roll[1], cfg.num_bins_body_roll),
+        )
+        low = np.array(
+            [cfg.lin_vel_x[0], cfg.lin_vel_y[0], cfg.ang_vel_yaw[0], cfg.body_pitch_range[0], cfg.body_roll_range[0]]
+        )
+        high = np.array(
+            [cfg.lin_vel_x[1], cfg.lin_vel_y[1], cfg.ang_vel_yaw[1], cfg.body_pitch_range[1], cfg.body_roll_range[1]]
+        )
+        self._curriculum.set_to(low=low, high=high)
+        self.env_command_bins = np.zeros(self.num_envs, dtype=np.int64)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.command_buffer
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+            env_ids_tensor = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        self.arm_time[env_ids] = 0.0
+        self.gait_indices[env_ids] = 0.0
+        self.commands_arm[env_ids] = 0.0
+        self.commands_arm_obs[env_ids] = 0.0
+        self.target_abg[env_ids] = 0.0
+        self.obj_quats[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        for key in self.command_sums:
+            self.command_sums[key][env_ids] = 0.0
+        self._update_switch_state()
+        self._resample_locomotion_commands(env_ids_tensor, allow_curriculum_update=False)
+        if self.switch_open:
+            self._resample_arm_commands(env_ids_tensor)
+        self._step_contact_targets()
+
+    def _update_metrics(self):
+        pass
+
+    def accumulate_metric(self, name: str, values: torch.Tensor) -> None:
+        if name in self.command_sums:
+            self.command_sums[name] += values.detach()
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        self._resample_locomotion_commands(torch.as_tensor(env_ids, dtype=torch.long, device=self.device))
+
+    def _update_switch_state(self) -> None:
+        step = int(getattr(self._env, "common_step_counter", 0))
+        current_iteration = float(step) / float(max(self.cfg.steps_per_iteration, 1))
+        previous = self.switch_open
+        self.switch_open = current_iteration >= float(self.cfg.switch_iteration)
+        if self.switch_open and not previous:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            self.arm_time.zero_()
+            self._resample_arm_commands(env_ids)
+
+    def _update_command(self):
+        self._update_switch_state()
+        # locomotion 按固定时间间隔重采样；机械臂按各自轨迹时长重采样。
+        sample_interval = max(1, int(round(self.cfg.resampling_time_s / self._env.step_dt)))
+        env_ids = torch.where(
+            (self._env.episode_length_buf > 0) & (self._env.episode_length_buf % sample_interval == 0)
+        )[0]
+        if env_ids.numel() > 0:
+            self._resample_locomotion_commands(env_ids)
+        if self.switch_open:
+            self.arm_time += self._env.step_dt
+            env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
+            if env_ids.numel() > 0:
+                self._resample_arm_commands(env_ids)
+        self._step_contact_targets()
+        self.command_buffer = torch.cat(
+            (
+                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
+                # 第一阶段对 actor 暴露全零机械臂命令，保持与原版阶段切换语义一致。
+                torch.where(self.switch_open, self.commands_arm_obs, torch.zeros_like(self.commands_arm_obs)),
+                self.clock_inputs,
+            ),
+            dim=-1,
+        )
+
+    def _resample_locomotion_commands(self, env_ids: torch.Tensor, allow_curriculum_update: bool = True) -> None:
+        if env_ids.numel() == 0:
+            return
+        if allow_curriculum_update:
+            ep_len = max(
+                1.0,
+                min(float(self._env.max_episode_length), float(round(self.cfg.resampling_time_s / self._env.step_dt))),
+            )
+            old_bins = self.env_command_bins[env_ids.detach().cpu().numpy()]
+            task_rewards = []
+            success_thresholds = []
+            for key in GO2ARM_COMMAND_CURRICULUM_KEYS:
+                if key not in self.command_sums:
+                    continue
+                task_rewards.append(self.command_sums[key][env_ids] / ep_len)
+                success_thresholds.append(self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key])
+            self._curriculum.update(
+                old_bins,
+                task_rewards,
+                success_thresholds,
+                local_range=np.array([0.55, 0.55, 0.55, 1.0, 1.0]),
+            )
+        new_commands, new_bin_inds = self._curriculum.sample(batch_size=int(env_ids.numel()))
+        self.env_command_bins[env_ids.detach().cpu().numpy()] = new_bin_inds
+        self.commands_dog[env_ids, 0] = torch.as_tensor(new_commands[:, 0], device=self.device, dtype=torch.float32)
+        self.commands_dog[env_ids, 1] = torch.as_tensor(new_commands[:, 1], device=self.device, dtype=torch.float32)
+        self.commands_dog[env_ids, 2] = torch.as_tensor(new_commands[:, 2], device=self.device, dtype=torch.float32)
+        zero_mask = torch.rand(env_ids.numel(), device=self.device) < 0.1
+        if torch.any(zero_mask):
+            self.commands_dog[env_ids[zero_mask], :3] = 0.0
+        self.commands_dog[env_ids, 0] *= torch.abs(self.commands_dog[env_ids, 0]) > 0.07
+        self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
+        self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.10
+        if not self.switch_open:
+            self.commands_dog[env_ids, 3] = torch.as_tensor(new_commands[:, 3], device=self.device, dtype=torch.float32)
+            self.commands_dog[env_ids, 4] = torch.as_tensor(new_commands[:, 4], device=self.device, dtype=torch.float32)
+        for key in self.command_sums:
+            self.command_sums[key][env_ids] = 0.0
+
+    def apply_plan_actions(self, plan_actions: torch.Tensor) -> None:
+        """应用 `auto_train` 机械臂 policy 额外输出的 2 维 body pitch/roll 规划动作。"""
+        if plan_actions.shape[-1] < 2:
+            raise ValueError(f"RoboDuet plan actions expect at least 2 dims, but got shape {tuple(plan_actions.shape)}.")
+        rescaled_actions = plan_actions[..., :2] * 0.4
+        self.commands_dog[:, 3] = torch.clamp(
+            rescaled_actions[:, 0],
+            min=float(self.cfg.limit_body_pitch[0]),
+            max=float(self.cfg.limit_body_pitch[1]) * 0.75,
+        )
+        self.commands_dog[:, 4] = torch.clamp(
+            rescaled_actions[:, 1],
+            min=float(self.cfg.limit_body_roll[0]),
+            max=float(self.cfg.limit_body_roll[1]),
+        )
+
+    def _resample_arm_commands(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        self.commands_arm[env_ids, 0] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.l_range)
+        self.commands_arm[env_ids, 1] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.p_range)
+        self.commands_arm[env_ids, 2] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.y_range)
+        self.commands_arm_obs[env_ids, :3] = self.commands_arm[env_ids]
+        roll = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.roll_ee_range)
+        pitch = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.pitch_ee_range)
+        yaw = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.yaw_ee_range)
+        zero = torch.zeros_like(roll)
+        q1 = quat_from_euler_xyz(zero, zero, yaw)
+        q2 = quat_from_euler_xyz(zero, pitch, zero)
+        q3 = quat_from_euler_xyz(roll, zero, zero)
+        quats = quat_mul(q1, quat_mul(q2, q3))
+        self.obj_quats[env_ids] = quats
+        self.target_abg[env_ids] = _quat_to_abg(quats)
+        self.commands_arm_obs[env_ids, 3:6] = self.target_abg[env_ids]
+        self.T_trajs[env_ids] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.traj_time_range)
+        self.arm_time[env_ids] = 0.0
+
+    def _step_contact_targets(self) -> None:
+        frequencies = self.cfg.gait_frequency
+        phases, offsets, bounds = 0.5, 0.0, 0.0
+        durations = self.cfg.gait_duration
+        self.gait_indices = torch.remainder(self.gait_indices + self._env.step_dt * frequencies, 1.0)
+        foot_indices = [
+            self.gait_indices + phases + offsets + bounds,
+            self.gait_indices + offsets,
+            self.gait_indices + bounds,
+            self.gait_indices + phases,
+        ]
+        for idxs in foot_indices:
+            standing = torch.norm(self.commands_dog[:, :3], dim=1) < 0.1
+            idxs[standing] = 0.25
+            stance = torch.remainder(idxs, 1.0) < durations
+            swing = ~stance
+            idxs[stance] = torch.remainder(idxs[stance], 1.0) * (0.5 / durations)
+            idxs[swing] = 0.5 + (torch.remainder(idxs[swing], 1.0) - durations) * (0.5 / (1.0 - durations))
+        self.foot_indices = torch.remainder(torch.stack(foot_indices, dim=1), 1.0)
+        self.clock_inputs = torch.sin(2.0 * math.pi * self.foot_indices)
+        normal = torch.distributions.normal.Normal(0.0, self.cfg.gait_kappa)
+        desired_contact_states = []
+        for phase in foot_indices:
+            wrapped = torch.remainder(phase, 1.0)
+            desired = normal.cdf(wrapped) * (1.0 - normal.cdf(wrapped - 0.5)) + normal.cdf(
+                wrapped - 1.0
+            ) * (1.0 - normal.cdf(wrapped - 1.5))
+            desired_contact_states.append(desired)
+        self.desired_contact_states = torch.stack(desired_contact_states, dim=1)
+
+
+RoboDuetCommandCfg.class_type = RoboDuetCommand

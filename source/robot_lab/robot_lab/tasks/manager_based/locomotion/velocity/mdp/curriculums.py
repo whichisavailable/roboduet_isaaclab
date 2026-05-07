@@ -112,6 +112,11 @@ def go2arm_reaching_stages(
     stage3_xy_end_iteration: int = 3000,
     stage2_expand_reach_fraction: float = 0.5,
     stage2_ratio_reach_fraction: float = 0.5,
+    workspace_position_std_stage1_end_iteration: int = 300,
+    workspace_position_std_stage2_end_iteration: int = 700,
+    workspace_position_std_stage1: float = 0.5,
+    workspace_position_std_stage2: float = 0.25,
+    workspace_position_std_stage3: float = 0.1,
     position_range_b_loco_stage: Sequence[float] = (0.70, 1.20, 0.0, 0.0, 0.0, 0.0),
     world_z_range_loco_stage: Sequence[float] = (0.6926649548, 0.6926649548),
     euler_xyz_range_b_loco_stage: Sequence[float] = (0.0, 0.0, 1.5008926535, 1.5008926535, 0.0, 0.0),
@@ -119,9 +124,11 @@ def go2arm_reaching_stages(
     position_range_b_stage1: Sequence[float] = (0.10, 0.24, -0.12, 0.12, 0.0, 0.0),
     position_range_b_stage2_allowed_start: Sequence[float] = (0.08, 0.30, -0.14, 0.14, 0.0, 0.0),
     position_range_b_stage3: Sequence[float] = (0.05, 2.00, -0.35, 0.35, 0.0, 0.0),
+    world_z_range_stage1_start: Sequence[float] | None = None,
     world_z_range_stage1: Sequence[float] = (0.85, 0.95),
     world_z_range_stage2_allowed_start: Sequence[float] = (0.70, 1.06),
     world_z_range_stage3: Sequence[float] = (0.02, 1.20),
+    euler_xyz_range_b_stage1_start: Sequence[float] | None = None,
     euler_xyz_range_b_stage1: Sequence[float] = (-0.50, 0.50, -0.50, 0.50, -3.14159, 3.14159),
     euler_xyz_range_b_stage2_allowed: Sequence[float] = (-0.50, 0.50, -0.50, 0.50, -3.14159, 3.14159),
     euler_xyz_range_b_stage3: Sequence[float] = (-0.50, 0.50, -0.50, 0.50, -3.14159, 3.14159),
@@ -154,6 +161,10 @@ def go2arm_reaching_stages(
     reset_root_yaw_range_stage1: Sequence[float] = (-0.06, 0.06),
     reset_root_yaw_range_stage2: Sequence[float] = (-0.10, 0.10),
     reset_root_yaw_range_stage3: Sequence[float] = (-0.18, 0.18),
+    base_height_termination_soft_normal: float | None = None,
+    base_height_termination_hard_normal: float | None = None,
+    base_height_termination_soft_low: float | None = None,
+    base_height_termination_hard_low: float | None = None,
 ) -> torch.Tensor:
     """go2arm staged curriculum: optional loco-only warmup, then manipulation range expansion."""
     del env_ids
@@ -162,6 +173,12 @@ def go2arm_reaching_stages(
     command_cfg = command_term.cfg
     step = int(getattr(env, "common_step_counter", 0))
     current_iteration = float(step) / float(max(steps_per_iteration, 1))
+    if current_iteration < workspace_position_std_stage1_end_iteration:
+        current_workspace_position_std = float(workspace_position_std_stage1)
+    elif current_iteration < workspace_position_std_stage2_end_iteration:
+        current_workspace_position_std = float(workspace_position_std_stage2)
+    else:
+        current_workspace_position_std = float(workspace_position_std_stage3)
 
     if current_iteration < loco_stage_end_iteration:
         stage_progress = _clamp_progress(current_iteration, 0, loco_stage_end_iteration)
@@ -181,7 +198,8 @@ def go2arm_reaching_stages(
         current_reset_root_x_range = tuple(float(v) for v in reset_root_x_range_stage1)
         current_reset_root_y_range = tuple(float(v) for v in reset_root_y_range_stage1)
         current_reset_root_yaw_range = tuple(float(v) for v in reset_root_yaw_range_stage1)
-        current_gating_fixed_d = 1.0
+        current_gating_fixed_d = None
+        current_height_termination_progress = 0.0
         stage_value = stage_progress
     elif current_iteration < stage1_end_iteration:
         stage_progress = _clamp_progress(current_iteration, loco_stage_end_iteration, stage1_end_iteration)
@@ -191,8 +209,16 @@ def go2arm_reaching_stages(
             )
         else:
             current_position_range_b = tuple(float(v) for v in position_range_b_stage1)
-        current_euler_xyz_range_b = tuple(float(v) for v in euler_xyz_range_b_stage1)
-        current_world_z_range = tuple(float(v) for v in world_z_range_stage1)
+        if euler_xyz_range_b_stage1_start is not None:
+            current_euler_xyz_range_b = _lerp_tuple(
+                euler_xyz_range_b_stage1_start, euler_xyz_range_b_stage1, stage_progress
+            )
+        else:
+            current_euler_xyz_range_b = tuple(float(v) for v in euler_xyz_range_b_stage1)
+        if world_z_range_stage1_start is not None:
+            current_world_z_range = _lerp_tuple(world_z_range_stage1_start, world_z_range_stage1, stage_progress)
+        else:
+            current_world_z_range = tuple(float(v) for v in world_z_range_stage1)
         current_secondary_position_range_b = None
         current_secondary_euler_xyz_range_b = None
         current_secondary_world_z_range = None
@@ -207,6 +233,7 @@ def go2arm_reaching_stages(
         current_reset_root_y_range = tuple(float(v) for v in reset_root_y_range_stage1)
         current_reset_root_yaw_range = tuple(float(v) for v in reset_root_yaw_range_stage1)
         current_gating_fixed_d = None
+        current_height_termination_progress = 0.0
         stage_value = 1.0 + stage_progress
     elif current_iteration < stage2_hold_end_iteration:
         stage_progress = _clamp_progress(current_iteration, stage1_end_iteration, stage2_hold_end_iteration)
@@ -233,6 +260,7 @@ def go2arm_reaching_stages(
             reset_root_yaw_range_stage1, reset_root_yaw_range_stage2, stage_progress
         )
         current_gating_fixed_d = None
+        current_height_termination_progress = stage_progress
         stage_value = 2.0 + stage_progress
     elif current_iteration < stage2_expand_end_iteration:
         stage_progress = _frontloaded_progress(
@@ -269,6 +297,7 @@ def go2arm_reaching_stages(
             reset_root_yaw_range_stage1, reset_root_yaw_range_stage2, stage_progress
         )
         current_gating_fixed_d = None
+        current_height_termination_progress = 1.0
         stage_value = 3.0 + stage_progress
     elif current_iteration < stage2_ratio_end_iteration:
         stage_progress = _frontloaded_progress(
@@ -295,6 +324,7 @@ def go2arm_reaching_stages(
         current_reset_root_y_range = tuple(float(v) for v in reset_root_y_range_stage2)
         current_reset_root_yaw_range = tuple(float(v) for v in reset_root_yaw_range_stage2)
         current_gating_fixed_d = None
+        current_height_termination_progress = 1.0
         stage_value = 4.0 + stage_progress
     else:
         stage_progress = _clamp_progress(current_iteration, stage2_ratio_end_iteration, stage3_xy_end_iteration)
@@ -330,6 +360,7 @@ def go2arm_reaching_stages(
             reset_root_yaw_range_stage2, reset_root_yaw_range_stage3, stage_progress
         )
         current_gating_fixed_d = None
+        current_height_termination_progress = 1.0
         stage_value = 5.0 + stage_progress
 
     command_cfg.position_range_b = current_position_range_b
@@ -359,7 +390,40 @@ def go2arm_reaching_stages(
     env.cfg.commands.ee_pose.tertiary_sample_prob = current_tertiary_sample_prob
     if hasattr(env.cfg.rewards, total_reward_term_name):
         getattr(env.cfg.rewards, total_reward_term_name).params["gating_fixed_d"] = current_gating_fixed_d
-    env.reward_manager.get_term_cfg(total_reward_term_name).params["gating_fixed_d"] = current_gating_fixed_d
+        getattr(env.cfg.rewards, total_reward_term_name).params["workspace_position_std"] = (
+            current_workspace_position_std
+        )
+    total_reward_term_cfg = env.reward_manager.get_term_cfg(total_reward_term_name)
+    total_reward_term_cfg.params["gating_fixed_d"] = current_gating_fixed_d
+    total_reward_term_cfg.params["workspace_position_std"] = current_workspace_position_std
+
+    if (
+        base_height_termination_soft_normal is not None
+        and base_height_termination_hard_normal is not None
+        and base_height_termination_soft_low is not None
+        and base_height_termination_hard_low is not None
+    ):
+        current_soft_minimum_height = _lerp_value(
+            base_height_termination_soft_normal,
+            base_height_termination_soft_low,
+            current_height_termination_progress,
+        )
+        current_hard_minimum_height = _lerp_value(
+            base_height_termination_hard_normal,
+            base_height_termination_hard_low,
+            current_height_termination_progress,
+        )
+        if hasattr(env.cfg.terminations, "base_height_termination"):
+            env.cfg.terminations.base_height_termination.params["soft_minimum_height"] = current_soft_minimum_height
+            env.cfg.terminations.base_height_termination.params["hard_minimum_height"] = current_hard_minimum_height
+        if hasattr(env, "termination_manager"):
+            try:
+                base_height_term_cfg = env.termination_manager.get_term_cfg("base_height_termination")
+            except Exception:
+                base_height_term_cfg = None
+            if base_height_term_cfg is not None:
+                base_height_term_cfg.params["soft_minimum_height"] = current_soft_minimum_height
+                base_height_term_cfg.params["hard_minimum_height"] = current_hard_minimum_height
 
     env.cfg.events.randomize_reset_joints.params["position_range"] = current_reset_joint_position_range
     env.cfg.events.randomize_reset_joints.params["velocity_range"] = current_reset_joint_velocity_range
@@ -369,3 +433,14 @@ def go2arm_reaching_stages(
         "yaw": current_reset_root_yaw_range,
     }
     return torch.tensor(stage_value, device=env.device)
+
+
+def roboduet_stage_switch(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    command_name: str,
+) -> torch.Tensor:
+    del env_ids
+    term = env.command_manager.get_term(command_name)
+    term._update_switch_state()
+    return torch.full((env.num_envs,), 1.0 if term.switch_open else 0.0, device=env.device)

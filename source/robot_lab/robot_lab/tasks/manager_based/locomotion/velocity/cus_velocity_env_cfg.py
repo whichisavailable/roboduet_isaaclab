@@ -77,8 +77,10 @@ GO2ARM_BASE_BODY_NAME = "base_link"
 # 四个足端 body 名称。
 GO2ARM_FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 GO2ARM_FOOT_NAMES = list(GO2ARM_FOOT_BODY_NAMES)
-GO2ARM_CONTACT_SENSOR_PRIM_PATH = "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|base_link|link[1-6])$"
-# 非法接触检测只覆盖足端、base_link 和机械臂主 link，避免腿部辅助碰撞体误触发。
+GO2ARM_CONTACT_SENSOR_PRIM_PATH = (
+    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_calf(?:_link)?|base_link|link[1-6])$"
+)
+# Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]
 # 预设 trot 步态偏置。
 GO2ARM_TROT_PHASE_OFFSETS = (0.0, 0.5, 0.5, 0.0)
@@ -295,6 +297,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
     def __init__(self, cfg: "Go2ArmDefaultDeltaJointPositionActionCfg", env):
         super().__init__(cfg, env)
         self._env = env
+        self._action_scale = float(cfg.action_scale)
         # 这里显式解析“偏移量 clip”，而不是沿用 JointAction 里对最终绝对目标的 clip。
         # 目标是让策略直接输出“弧度偏移”，再把偏移限制在一个合理小范围内。
         self._delta_clip = None
@@ -313,6 +316,15 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             ]
             if fixed_ids:
                 self._fixed_delta_action_joint_ids = torch.tensor(fixed_ids, dtype=torch.long, device=self.device)
+        self._hip_scale_joint_ids = None
+        if cfg.hip_joint_names is not None:
+            hip_ids = [
+                joint_id
+                for joint_id, joint_name in enumerate(self._joint_names)
+                if any(re.fullmatch(pattern, joint_name) for pattern in cfg.hip_joint_names)
+            ]
+            if hip_ids:
+                self._hip_scale_joint_ids = torch.tensor(hip_ids, dtype=torch.long, device=self.device)
 
     def process_actions(self, actions: torch.Tensor):
         # Store the effective action after any curriculum mask, so observations/rewards see executed deltas.
@@ -323,13 +335,42 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             if current_iteration < float(self.cfg.fixed_delta_action_until_iteration):
                 effective_actions = actions.clone()
                 effective_actions[:, self._fixed_delta_action_joint_ids] = float(self.cfg.fixed_delta_action_value)
+        prev_effective_action = getattr(self._env, "_go2arm_effective_action", None)
+        prev_prev_effective_action = getattr(self._env, "_go2arm_prev_effective_action", None)
+        if prev_effective_action is None:
+            prev_effective_action = torch.zeros_like(effective_actions)
+        if prev_prev_effective_action is None:
+            prev_prev_effective_action = torch.zeros_like(effective_actions)
+        self._env._go2arm_prev_prev_effective_action = prev_prev_effective_action.clone()
+        self._env._go2arm_prev_effective_action = prev_effective_action.clone()
+        self._env._go2arm_effective_action = effective_actions.detach().clone()
         self._raw_actions[:] = effective_actions
-        delta_actions = self._raw_actions
+        delta_actions = self._raw_actions * self._action_scale
+        if self._hip_scale_joint_ids is not None:
+            delta_actions = delta_actions.clone()
+            delta_actions[:, self._hip_scale_joint_ids] *= float(self.cfg.hip_scale_reduction)
         if self._delta_clip is not None:
             # 这里 clip 的是“相对默认姿态的关节偏移量”，不是最终绝对关节目标。
             delta_actions = torch.clamp(delta_actions, min=self._delta_clip[:, :, 0], max=self._delta_clip[:, :, 1])
         # 最终目标保持为：default_joint_pos + delta_action，不再额外乘一个 scale。
         self._processed_actions = delta_actions + self._offset
+        self._env._go2arm_joint_pos_target = self._processed_actions.detach().clone()
+
+    def reset(self, env_ids=None):
+        super().reset(env_ids)
+        if env_ids is None:
+            env_ids = slice(None)
+        for attr_name in (
+            "_go2arm_effective_action",
+            "_go2arm_prev_effective_action",
+            "_go2arm_prev_prev_effective_action",
+            "_go2arm_joint_pos_target",
+            "_go2arm_last_joint_pos_target",
+            "_go2arm_last_last_joint_pos_target",
+        ):
+            value = getattr(self._env, attr_name, None)
+            if value is not None:
+                value[env_ids] = 0.0
 
 
 @configclass
@@ -339,6 +380,9 @@ class Go2ArmDefaultDeltaJointPositionActionCfg(mdp.JointPositionActionCfg):
     class_type: type[ActionTerm] = Go2ArmDefaultDeltaJointPositionAction
     # 对“关节偏移量”做 clip，而不是对最终绝对关节目标做 clip。
     delta_clip: dict[str, tuple[float, float]] | None = None
+    action_scale: float = 1.0
+    hip_joint_names: list[str] | None = ["^(FL|FR|RL|RR)_hip_joint$"]
+    hip_scale_reduction: float = 1.0
     fixed_delta_action_joint_names: list[str] | None = None
     fixed_delta_action_until_iteration: int | None = None
     fixed_delta_action_steps_per_iteration: int = 24
@@ -403,6 +447,7 @@ class Go2ArmTeacherCoreObsCfg(ObsGroup):
     # 上一步动作。
     actions = ObsTerm(
         func=mdp.last_action,
+        params={"action_name": "joint_pos"},
         clip=(-100.0, 100.0),
         scale=1.0,
     )
@@ -783,8 +828,12 @@ class RewardsCfg:
             "mani_regularization_support_left_right_x_symmetry_std": 0.05,
             "mani_regularization_support_left_right_y_symmetry_weight": 0.0,
             "mani_regularization_support_left_right_y_symmetry_std": 0.05,
-            "mani_regularization_support_symmetry_max_base_lin_speed": None,
-            "mani_regularization_support_symmetry_max_base_ang_speed": None,
+            "mani_regularization_support_foot_xy_range_weight": 0.0,
+            "mani_regularization_support_foot_xy_range_std": 0.02,
+            "mani_regularization_support_foot_xy_range_x_abs_min": 0.0,
+            "mani_regularization_support_foot_xy_range_x_abs_max": None,
+            "mani_regularization_support_foot_xy_range_y_abs_min": 0.0,
+            "mani_regularization_support_foot_xy_range_y_abs_max": None,
             # manipulation 势奖励与累计误差。
             # 势奖励内部使用的命令名。
             "mani_potential_command_name": "ee_pose",
@@ -875,6 +924,7 @@ class RewardsCfg:
             "loco_regularization_touchdown_foot_y_distance_weight": 0.0,
             "loco_regularization_touchdown_foot_y_distance_std": 0.03,
             "loco_regularization_touchdown_foot_y_distance_min_distance": 0.12,
+            "loco_regularization_touchdown_foot_y_distance_max_distance": None,
             # 软 trot 足端接触规律正则权重。
             "loco_regularization_feet_contact_soft_trot_weight": 0.0,
             # soft trot 正则读取的足端接触传感器。
@@ -901,7 +951,6 @@ class RewardsCfg:
             "loco_regularization_feet_contact_soft_trot_soft_contact_k": 10.0,
             # 认为“接触成立”的接触力阈值。
             "loco_regularization_feet_contact_soft_trot_contact_force_threshold": 1.0,
-            "loco_regularization_feet_contact_soft_trot_support_factor_low": 0.25,
             # soft trot 判断地面高度所用的四个足端扫描器。
             "loco_regularization_feet_contact_soft_trot_ground_sensor_names": GO2ARM_FOOT_SCANNER_NAMES,
             # 机械臂摆动正则权重，用于约束 locomotion 阶段的 arm 动作幅度。
@@ -915,6 +964,8 @@ class RewardsCfg:
             # basic 奖励按加权求和。
             # 存活奖励权重。
             "basic_is_alive_weight": 0.0,
+            "basic_termination_penalty_weight": 0.0,
+            "basic_termination_penalty_excluded_terms": ("task_success",),
             # 碰撞惩罚总权重。
             "basic_collision_weight": 0.0,
             # 碰撞噪声过滤阈值。
@@ -935,12 +986,12 @@ class RewardsCfg:
             "basic_joint_torque_sq_weight": 0.0,
             # 关节力矩平方和惩罚读取的关节集合。
             "basic_joint_torque_sq_asset_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_ALL_JOINT_NAMES),
-            "basic_joint_torque_sq_normalize_by_effort_limit": True,
+            "basic_joint_torque_sq_normalize_by_effort_limit": False,
             # 关节功率惩罚权重。
             "basic_joint_power_weight": 0.0,
             # 关节功率惩罚读取的关节集合。
             "basic_joint_power_asset_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_ALL_JOINT_NAMES),
-            "basic_joint_power_normalize_by_effort_limit": True,
+            "basic_joint_power_normalize_by_effort_limit": False,
         },
     )
     # 保留有状态势奖励项，供 total_reward 复用上一时刻缓存。
@@ -995,20 +1046,20 @@ class TerminationsCfg:
         func=mdp.base_orientation_termination,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
-            "soft_roll_pitch_limit": 0.75,
-            "hard_roll_pitch_limit": 1.10,
-            "consecutive_steps": 3,
+            "soft_roll_pitch_limit": 0.4,
+            "hard_roll_pitch_limit": 0.5,
+            "consecutive_steps": 5,
         },
     )
     # 基座高度终止：过低则认为跌倒或趴地。
     base_height_termination = DoneTerm(
         func=mdp.base_height_termination,
         params={
-            "soft_minimum_height": 0.23,
-            "hard_minimum_height": 0.18,
+            "soft_minimum_height": 0.2,
+            "hard_minimum_height": 0.16,
             "asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
             "sensor_cfg": SceneEntityCfg("height_scanner_base"),
-            "consecutive_steps": 3,
+            "consecutive_steps": 5,
         },
     )
     # 关节位置严重越界终止。
@@ -1037,11 +1088,10 @@ class TerminationsCfg:
         func=mdp.joint_torque_termination,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            # Terminate only on sustained single-joint torque clipping:
-            # abs(computed_torque - applied_torque) / effort_limit.
-            "soft_max_ratio": 0.8,
-            "hard_max_ratio": None,
-            "consecutive_steps": 6,
+            # Legacy absolute clipping sum: sum(abs(computed_torque - applied_torque)).
+            "soft_max_violation": 3.0,
+            "hard_max_violation": 10.0,
+            "consecutive_steps": 8,
         },
     )
     # 成功终止：基座和机械臂速度都很小，且末端跟踪误差足够小。
@@ -1054,7 +1104,7 @@ class TerminationsCfg:
             "base_lin_vel_threshold": 0.05,
             "base_ang_vel_threshold": 0.10,
             "arm_joint_vel_threshold": 0.05,
-            "ee_tracking_error_threshold": 0.02,
+            "ee_tracking_error_threshold": 0.05,
             "consecutive_steps": 3,
         },
     )

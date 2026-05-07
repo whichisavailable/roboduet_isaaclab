@@ -54,6 +54,12 @@ parser.add_argument(
     default=None,
     help="Fixed Go2Arm ee target orientation for play in base-frame roll/pitch/yaw radians.",
 )
+parser.add_argument(
+    "--go2arm_trace_actions",
+    action="store_true",
+    default=False,
+    help="Print Go2Arm action and joint state diagnostics during play.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -79,6 +85,7 @@ import time
 import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl.utils import resolve_callable
 
 from isaaclab.devices import Se2Keyboard, Se2KeyboardCfg
 from isaaclab.envs import (
@@ -91,6 +98,7 @@ from isaaclab.envs import (
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import subtract_frame_transforms
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -119,6 +127,52 @@ def _print_go2arm_termination_reasons(extras: dict) -> None:
         print(f"[TERMINATION env{env_id}] {state}: {reasons}")
 
 
+def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int) -> None:
+    """Print one compact Go2Arm action snapshot for play-time debugging."""
+    robot = env.unwrapped.scene["robot"]
+    action_manager = env.unwrapped.action_manager
+
+    effective_action = getattr(env.unwrapped, "_go2arm_effective_action", None)
+    current_action = action_manager.action[0].detach().cpu()
+    policy_action = policy_action.detach().cpu()
+    if effective_action is not None:
+        effective_action = effective_action[0].detach().cpu()
+    else:
+        effective_action = current_action
+    prev_action = action_manager.prev_action[0].detach().cpu()
+    joint_pos = robot.data.joint_pos[0].detach().cpu()
+    default_joint_pos = robot.data.default_joint_pos[0].detach().cpu()
+    root_pos_w = robot.data.root_pos_w[0].detach().cpu()
+    root_quat_w = robot.data.root_quat_w[0].detach().cpu()
+    ee_idx = robot.body_names.index("link6")
+    ee_pos_w = robot.data.body_pos_w[0, ee_idx].detach().cpu()
+    ee_quat_w = robot.data.body_quat_w[0, ee_idx].detach().cpu()
+    ee_pos_b, _ = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+    ee_pos_b = ee_pos_b.detach().cpu()
+
+    joint_delta = joint_pos - default_joint_pos
+    arm_action = current_action[-6:]
+    effective_arm_action = effective_action[-6:]
+    policy_arm_action = policy_action[-6:]
+    arm_joint_delta = joint_delta[-6:]
+    arm_joint_pos = joint_pos[-6:]
+
+    print(
+        f"[GO2ARM PLAY step={step}] "
+        f"policy_norm={float(policy_action.norm().item()):.3f} "
+        f"exec_norm={float(current_action.norm().item()):.3f} "
+        f"prev_norm={float(prev_action.norm().item()):.3f} "
+        f"base_w={[round(float(x), 3) for x in root_pos_w.tolist()]} "
+        f"ee_w={[round(float(x), 3) for x in ee_pos_w.tolist()]} "
+        f"ee_b={[round(float(x), 3) for x in ee_pos_b.tolist()]} "
+        f"policy_arm={[round(float(x), 3) for x in policy_arm_action.tolist()]} "
+        f"exec_arm={[round(float(x), 3) for x in effective_arm_action.tolist()]} "
+        f"masked_arm={[round(float(x), 3) for x in arm_action.tolist()]} "
+        f"arm_joint_delta={[round(float(x), 3) for x in arm_joint_delta.tolist()]} "
+        f"arm_joint_pos={[round(float(x), 3) for x in arm_joint_pos.tolist()]}"
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -143,7 +197,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.scene.terrain.terrain_generator.curriculum = False
 
     # disable randomization for play
-    env_cfg.observations.policy.enable_corruption = False
+    for obs_group_name in ("policy", "dog_policy", "arm_policy", "privileged", "dog_privileged", "arm_privileged"):
+        obs_group = getattr(env_cfg.observations, obs_group_name, None)
+        if obs_group is not None:
+            obs_group.enable_corruption = False
     # remove random pushing
     env_cfg.events.randomize_apply_external_force_torque = None
     env_cfg.events.push_robot = None
@@ -151,6 +208,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.curriculum.command_levels_ang_vel = None
     if "go2arm" in task_name.lower():
         env_cfg.enable_play_termination_reason_logging = True
+        if hasattr(env_cfg, "actions") and hasattr(env_cfg.actions, "joint_pos"):
+            # Play starts a fresh environment counter at 0, so the training-time fixed arm freeze
+            # would otherwise be active again for many steps. Disable it here to observe the
+            # policy's real arm output during play.
+            env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = 0
+            print("[INFO] Go2Arm play override: disabled fixed arm-action freeze for playback.")
     go2arm_fixed_target = args_cli.go2arm_ee_pos is not None or args_cli.go2arm_ee_rpy is not None
     if go2arm_fixed_target and hasattr(env_cfg.curriculum, "go2arm_reaching_stages"):
         env_cfg.curriculum.go2arm_reaching_stages = None
@@ -256,7 +319,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+        runner_class = resolve_callable(agent_cfg.class_name)
+        runner = runner_class(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     runner.load(resume_path)
 
     # obtain the trained policy for inference
@@ -265,11 +329,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
     try:
-        # version 2.3 onwards
         policy_nn = runner.alg.policy
     except AttributeError:
-        # version 2.2 and below
-        policy_nn = runner.alg.actor_critic
+        policy_nn = getattr(runner.alg, "actor_critic", None)
+    if policy_nn is None and hasattr(policy, "act_inference"):
+        policy_nn = policy
 
     # extract the normalizer
     if hasattr(policy_nn, "actor_obs_normalizer"):
@@ -283,7 +347,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 只要策略对象自己提供了 as_jit()/as_onnx()，就直接使用策略自带的导出包装。
     # 这样可以确保 go2arm 这类自定义 privileged teacher policy 走正确的导出语义。
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    if hasattr(policy_nn, "as_jit") and hasattr(policy_nn, "as_onnx"):
+    if getattr(policy_nn, "skip_generic_export", False):
+        print("[INFO] Skipping generic play-time export for RoboDuet automatic policy. Use training-time deploy_model artifacts instead.")
+    elif policy_nn is not None and hasattr(policy_nn, "as_jit") and hasattr(policy_nn, "as_onnx"):
         os.makedirs(export_model_dir, exist_ok=True)
 
         # 直接导出 TorchScript。
@@ -305,27 +371,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             input_names=onnx_model.input_names,
             output_names=onnx_model.output_names,
         )
-    else:
+    elif policy_nn is not None:
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
         export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    use_mean_action = "go2arm" in task_name.lower() and hasattr(policy, "act_inference")
+    if "go2arm" in task_name.lower() and not use_mean_action:
+        print("[INFO] Go2Arm play fallback: policy has no act_inference(); using policy(obs) instead.")
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    trace_step = 0
+    trace_interval = 20 if args_cli.go2arm_trace_actions else None
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions = policy(obs)
+            if use_mean_action:
+                actions = policy.act_inference(obs)
+            else:
+                actions = policy(obs)
             # env stepping
             obs, _, dones, extras = env.step(actions)
             _print_go2arm_termination_reasons(extras)
+            if trace_interval is not None and timestep % trace_interval == 0:
+                _print_go2arm_action_state(env, actions[0], trace_step)
+            trace_step += 1
             # reset recurrent states for episodes that have terminated
-            policy_nn.reset(dones)
+            if hasattr(policy, "reset"):
+                policy.reset(dones)
+            elif policy_nn is not None and hasattr(policy_nn, "reset"):
+                policy_nn.reset(dones)
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video

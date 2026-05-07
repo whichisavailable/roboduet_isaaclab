@@ -14,19 +14,26 @@ from isaaclab.envs import mdp
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensor, RayCaster
-from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from .observations import (
+    GO2ARM_COMMAND_CURRICULUM_KEYS,
     GO2ARM_FOOT_BODY_NAMES,
+    GO2ARM_FOOT_SENSOR_NAMES,
     GO2ARM_FOOT_SPHERE_RADIUS,
     _get_go2arm_foot_kinematics,
+    _get_go2arm_ground_height_data,
+    _quat_to_abg,
     _go2arm_phase_offsets,
     get_go2arm_precise_foot_contact_forces,
     get_go2arm_precise_foot_contact_timers,
     get_go2arm_precise_foot_normal_forces,
+    roboduet_current_action,
+    roboduet_current_ee_quat_in_base,
+    roboduet_current_lpy,
 )
 
 
@@ -60,7 +67,6 @@ def _get_go2arm_support_contact_stats(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
     contact_force_threshold: float,
-    support_factor_low: float,
 ) -> dict[str, torch.Tensor]:
     """Cache per-step support-contact statistics reused by reward logging."""
     cache_key = (
@@ -68,7 +74,6 @@ def _get_go2arm_support_contact_stats(
         sensor_cfg.name,
         tuple(int(body_id) for body_id in sensor_cfg.body_ids),
         float(contact_force_threshold),
-        float(support_factor_low),
     )
     cached = getattr(env, "_go2arm_support_contact_cache", None)
     if cached is not None and cached.get("key") == cache_key:
@@ -79,38 +84,12 @@ def _get_go2arm_support_contact_stats(
         raise RuntimeError("Go2Arm support-contact stats require the dedicated foot sensors to be available.")
     in_contact = precise_normal_forces > contact_force_threshold
     support_count = torch.sum(in_contact.float(), dim=1)
-    support_factor = _go2arm_trot_support_factor_from_contacts(
-        in_contact,
-        bad_support_factor=support_factor_low,
-    )
     value = {
         "in_contact": in_contact,
         "support_count": support_count,
-        "support_factor": support_factor,
     }
     env._go2arm_support_contact_cache = {"key": cache_key, "value": value}
     return value
-
-
-def _go2arm_trot_support_factor_from_contacts(
-    in_contact: torch.Tensor,
-    bad_support_factor: float,
-    diag_double_factor: float = 1.0,
-    all_four_factor: float = 0.9,
-) -> torch.Tensor:
-    """Score support pattern for FL, FR, RL, RR contacts."""
-    if in_contact.shape[-1] != 4:
-        raise ValueError("go2arm trot support factor expects exactly four feet ordered as FL, FR, RL, RR.")
-
-    contacts = in_contact.bool()
-    fl, fr, rl, rr = contacts.unbind(dim=1)
-    diag_double = (fl & rr & ~fr & ~rl) | (fr & rl & ~fl & ~rr)
-    all_four = fl & fr & rl & rr
-
-    factor = torch.full((contacts.shape[0],), float(bad_support_factor), dtype=torch.float32, device=contacts.device)
-    factor = torch.where(all_four, float(all_four_factor) * torch.ones_like(factor), factor)
-    factor = torch.where(diag_double, float(diag_double_factor) * torch.ones_like(factor), factor)
-    return factor
 
 
 def _phi_quadratic(value: torch.Tensor, std: float) -> torch.Tensor:
@@ -417,6 +396,22 @@ def moving_arm_joint_velocity_penalty(
     return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
 
 
+def _asset_body_or_root_height_w(asset: RigidObject, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Return selected body height when body_ids are resolved, otherwise articulation root height."""
+    body_ids = getattr(asset_cfg, "body_ids", None)
+    if body_ids is None:
+        return asset.data.root_pos_w[:, 2]
+    try:
+        if len(body_ids) == 0:
+            return asset.data.root_pos_w[:, 2]
+    except TypeError:
+        pass
+    body_height = asset.data.body_pos_w[:, body_ids, 2]
+    if body_height.ndim > 1:
+        body_height = torch.mean(body_height, dim=1)
+    return body_height
+
+
 def base_height_penalty(
     env: ManagerBasedRLEnv,
     std: float,
@@ -426,19 +421,20 @@ def base_height_penalty(
 ) -> torch.Tensor:
     """Penalty on base-height deviation normalized by std."""
     asset: RigidObject = env.scene[asset_cfg.name]
+    body_height = _asset_body_or_root_height_w(asset, asset_cfg)
     if sensor_cfg is not None:
         # 有地形扫描器时，用机身高度减去局部地面高度来构造相对高度误差。
         sensor: RayCaster = env.scene[sensor_cfg.name]
         ray_hits = sensor.data.ray_hits_w[..., 2]
         if torch.isnan(ray_hits).any() or torch.isinf(ray_hits).any() or torch.max(torch.abs(ray_hits)) > 1e6:
             # 扫描结果异常时退化成直接使用世界系机身高度，避免 reward 数值异常。
-            ground_z = asset.data.root_pos_w[:, 2]
+            ground_z = torch.zeros_like(body_height)
         else:
             ground_z = torch.mean(ray_hits, dim=1)
-        height_error = asset.data.root_pos_w[:, 2] - (target_height + ground_z)
+        height_error = body_height - (target_height + ground_z)
     else:
         # 没有地形扫描器时，直接对世界系目标高度做约束。
-        height_error = asset.data.root_pos_w[:, 2] - target_height
+        height_error = body_height - target_height
     # 奖励形式是 phi(h - h_ref, std) = exp(-(h-h_ref)^2 / std)。
     return torch.abs(height_error) / std
 
@@ -451,16 +447,17 @@ def min_base_height_penalty(
 ) -> torch.Tensor:
     """One-sided penalty when base height falls below the minimum height."""
     asset: RigidObject = env.scene[asset_cfg.name]
+    body_height = _asset_body_or_root_height_w(asset, asset_cfg)
     if sensor_cfg is not None:
         sensor: RayCaster = env.scene[sensor_cfg.name]
         ray_hits = sensor.data.ray_hits_w[..., 2]
         if torch.isnan(ray_hits).any() or torch.isinf(ray_hits).any() or torch.max(torch.abs(ray_hits)) > 1e6:
-            ground_z = torch.zeros_like(asset.data.root_pos_w[:, 2])
+            ground_z = torch.zeros_like(body_height)
         else:
             ground_z = torch.mean(ray_hits, dim=1)
-        base_height = asset.data.root_pos_w[:, 2] - ground_z
+        base_height = body_height - ground_z
     else:
-        base_height = asset.data.root_pos_w[:, 2]
+        base_height = body_height
     return torch.clamp(minimum_height - base_height, min=0.0)
 
 
@@ -530,16 +527,16 @@ def target_workspace_position_penalty(
     x_max: float,
     y_weight: float,
     std: float,
-    clip_max: float,
 ) -> torch.Tensor:
-    """Penalize target position outside the comfortable base-frame manipulation workspace."""
+    """Reward target placement inside the comfortable base-frame manipulation workspace."""
     command_term = _ee_pose_command_term(env, command_name)
     target_pos_b = command_term.target_pos_b
     x = target_pos_b[:, 0]
     y = target_pos_b[:, 1]
     x_violation = torch.relu(float(x_min) - x) + torch.relu(x - float(x_max))
     y_penalty = float(y_weight) * torch.abs(y)
-    return torch.clamp((x_violation + y_penalty) / std, max=float(clip_max))
+    distance = x_violation + y_penalty
+    return torch.exp(-distance / max(float(std), 1.0e-6))
 
 
 def base_roll_ang_vel_penalty(
@@ -598,7 +595,6 @@ def feet_contact_soft_trot_reward(
     swing_height: float,
     soft_contact_k: float,
     contact_force_threshold: float = 1.0,
-    support_factor_low: float = 0.25,
     ground_sensor_names: Sequence[str] | None = None,
 ) -> torch.Tensor:
     # 整体结构参考feet-contact reward，但期望接触 c_des 改成软权重。
@@ -658,26 +654,7 @@ def feet_contact_soft_trot_reward(
     stance_term = c_des * in_contact * torch.exp(-(vel_xy**2) / vel_std)
 
     # 四只脚的摆动项和支撑项加总，作为整体步态奖励。
-    support_factor = _go2arm_trot_support_factor_from_contacts(
-        contact_mask,
-        bad_support_factor=support_factor_low,
-    )
-    return torch.sum(swing_term + stance_term, dim=1) * support_factor
-
-
-def feet_contact_soft_trot_support_factor(
-    env: ManagerBasedRLEnv,
-    sensor_cfg: SceneEntityCfg,
-    contact_force_threshold: float = 1.0,
-    support_factor_low: float = 0.25,
-) -> torch.Tensor:
-    """Return the support-factor used by the soft-trot reward."""
-    return _get_go2arm_support_contact_stats(
-        env,
-        sensor_cfg=sensor_cfg,
-        contact_force_threshold=contact_force_threshold,
-        support_factor_low=support_factor_low,
-    )["support_factor"]
+    return torch.sum(swing_term + stance_term, dim=1)
 
 
 def precise_feet_contact_count(
@@ -690,16 +667,19 @@ def precise_feet_contact_count(
         env,
         sensor_cfg=sensor_cfg,
         contact_force_threshold=contact_force_threshold,
-        support_factor_low=0.25,
     )["support_count"]
 
 
 def diagonal_foot_symmetry_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
+    contact_force_threshold: float = 1.0,
+    timer_std: float = 0.2,
 ) -> torch.Tensor:
-    """Penalty on diagonal-foot contact and air time mismatch."""
-    precise_timer_data = get_go2arm_precise_foot_contact_timers(env, sensor_cfg=sensor_cfg, threshold=1.0)
+    """Penalty on diagonal-foot contact, force, and timer mismatch."""
+    precise_timer_data = get_go2arm_precise_foot_contact_timers(
+        env, sensor_cfg=sensor_cfg, threshold=contact_force_threshold
+    )
     if precise_timer_data is not None:
         air_time = precise_timer_data["current_air_time"]
         contact_time = precise_timer_data["current_contact_time"]
@@ -708,9 +688,27 @@ def diagonal_foot_symmetry_penalty(
         air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
         contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
 
-    diag_pair_0 = (air_time[:, 0] - air_time[:, 3]) ** 2 + (contact_time[:, 0] - contact_time[:, 3]) ** 2
-    diag_pair_1 = (air_time[:, 1] - air_time[:, 2]) ** 2 + (contact_time[:, 1] - contact_time[:, 2]) ** 2
-    return 0.5 * (diag_pair_0 + diag_pair_1)
+    precise_normal_forces = get_go2arm_precise_foot_normal_forces(env, sensor_cfg=sensor_cfg)
+    if precise_normal_forces is not None:
+        normal_forces = precise_normal_forces
+    else:
+        contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+        normal_forces = torch.abs(contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, 2])
+
+    contact = (normal_forces > contact_force_threshold).float()
+    force_state = torch.clamp(normal_forces / max(float(contact_force_threshold), 1.0e-6), min=0.0, max=1.0)
+    timer_scale = max(float(timer_std) ** 2, 1.0e-6)
+
+    def _pair_penalty(first: int, second: int) -> torch.Tensor:
+        contact_mismatch = torch.square(contact[:, first] - contact[:, second])
+        force_mismatch = torch.square(force_state[:, first] - force_state[:, second])
+        timer_mismatch = (
+            torch.square(air_time[:, first] - air_time[:, second])
+            + torch.square(contact_time[:, first] - contact_time[:, second])
+        ) / timer_scale
+        return 0.5 * contact_mismatch + 0.3 * force_mismatch + 0.2 * timer_mismatch
+
+    return 0.5 * (_pair_penalty(0, 3) + _pair_penalty(1, 2))
 
 
 def _get_go2arm_foot_centers_b(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -751,27 +749,6 @@ def _get_go2arm_foot_contact_mask(env: ManagerBasedRLEnv, contact_force_threshol
         contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
         > contact_force_threshold
     )
-
-
-def _get_go2arm_stable_support_mask(
-    env: ManagerBasedRLEnv,
-    in_contact: torch.Tensor,
-    max_base_lin_speed: float | None = None,
-    max_base_ang_speed: float | None = None,
-) -> torch.Tensor:
-    """Return environments where all feet are in contact and the base is nearly stationary."""
-    support_mask = torch.all(in_contact, dim=1)
-    if max_base_lin_speed is None and max_base_ang_speed is None:
-        return support_mask
-
-    asset: Articulation = env.scene["robot"]
-    if max_base_lin_speed is not None:
-        base_lin_speed_xy = torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
-        support_mask = support_mask & (base_lin_speed_xy < float(max_base_lin_speed))
-    if max_base_ang_speed is not None:
-        base_yaw_speed = torch.abs(asset.data.root_ang_vel_b[:, 2])
-        support_mask = support_mask & (base_yaw_speed < float(max_base_ang_speed))
-    return support_mask
 
 
 def _compute_go2arm_left_right_symmetry_components(foot_positions_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -866,42 +843,53 @@ def _get_go2arm_touchdown_symmetry_components(
     return cached_value
 
 
-def support_left_right_x_symmetry_penalty(
-    env: ManagerBasedRLEnv,
-    max_base_lin_speed: float | None = None,
-    max_base_ang_speed: float | None = None,
-) -> torch.Tensor:
-    """Penalty on left-right x symmetry while all four feet are stably supporting."""
+def support_left_right_x_symmetry_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalty on left-right x symmetry while all four feet are supporting."""
     asset_cfg = _get_go2arm_default_foot_asset_cfg(env)
     foot_positions_b = _get_go2arm_foot_centers_b(env, asset_cfg)
     x_symmetry, _ = _compute_go2arm_left_right_symmetry_components(foot_positions_b)
     in_contact = _get_go2arm_foot_contact_mask(env, contact_force_threshold=1.0)
-    support_mask = _get_go2arm_stable_support_mask(
-        env,
-        in_contact,
-        max_base_lin_speed=max_base_lin_speed,
-        max_base_ang_speed=max_base_ang_speed,
-    )
+    support_mask = torch.all(in_contact, dim=1)
     return x_symmetry * support_mask.float()
 
 
-def support_left_right_y_symmetry_penalty(
-    env: ManagerBasedRLEnv,
-    max_base_lin_speed: float | None = None,
-    max_base_ang_speed: float | None = None,
-) -> torch.Tensor:
-    """Penalty on left-right y mirror symmetry while all four feet are stably supporting."""
+def support_left_right_y_symmetry_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalty on left-right y mirror symmetry while all four feet are supporting."""
     asset_cfg = _get_go2arm_default_foot_asset_cfg(env)
     foot_positions_b = _get_go2arm_foot_centers_b(env, asset_cfg)
     _, y_symmetry = _compute_go2arm_left_right_symmetry_components(foot_positions_b)
     in_contact = _get_go2arm_foot_contact_mask(env, contact_force_threshold=1.0)
-    support_mask = _get_go2arm_stable_support_mask(
-        env,
-        in_contact,
-        max_base_lin_speed=max_base_lin_speed,
-        max_base_ang_speed=max_base_ang_speed,
-    )
+    support_mask = torch.all(in_contact, dim=1)
     return y_symmetry * support_mask.float()
+
+
+def support_foot_xy_range_penalty(
+    env: ManagerBasedRLEnv,
+    x_abs_min: float,
+    x_abs_max: float | None,
+    y_abs_min: float,
+    y_abs_max: float | None,
+    contact_force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalty on supporting foot centers outside a body-frame abs-x/abs-y range."""
+    asset_cfg = _get_go2arm_default_foot_asset_cfg(env)
+    foot_positions_b = _get_go2arm_foot_centers_b(env, asset_cfg)
+    abs_x = torch.abs(foot_positions_b[..., 0])
+    abs_y = torch.abs(foot_positions_b[..., 1])
+
+    x_violation = torch.square(torch.clamp(float(x_abs_min) - abs_x, min=0.0))
+    y_violation = torch.square(torch.clamp(float(y_abs_min) - abs_y, min=0.0))
+    if x_abs_max is not None:
+        x_violation = x_violation + torch.square(torch.clamp(abs_x - float(x_abs_max), min=0.0))
+    if y_abs_max is not None:
+        y_violation = y_violation + torch.square(torch.clamp(abs_y - float(y_abs_max), min=0.0))
+
+    in_contact = _get_go2arm_foot_contact_mask(env, contact_force_threshold=contact_force_threshold)
+    violation = (x_violation + y_violation) * in_contact.float()
+    contact_count = torch.clamp(in_contact.float().sum(dim=1), min=1.0)
+    penalty = torch.sum(violation, dim=1) / contact_count
+    no_contact = ~torch.any(in_contact, dim=1)
+    return torch.where(no_contact, torch.zeros_like(penalty), penalty)
 
 
 def touchdown_left_right_x_symmetry_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -917,12 +905,17 @@ def touchdown_left_right_y_symmetry_penalty(env: ManagerBasedRLEnv) -> torch.Ten
 def touchdown_foot_y_distance_penalty(
     env: ManagerBasedRLEnv,
     min_distance: float,
+    max_distance: float | None = None,
 ) -> torch.Tensor:
-    """Penalty on recent touchdown points whose lateral distance to the base center is too small."""
+    """Penalty on recent touchdown points whose lateral distance leaves the target width band."""
     _get_go2arm_touchdown_symmetry_components(env)
     state = env._go2arm_touchdown_symmetry_state
     touchdown_y_distance = torch.abs(state["last_touchdown_positions_b"][..., 1])
-    foot_y_distance = torch.square(torch.clamp(min_distance - touchdown_y_distance, min=0.0))
+    lower_violation = torch.clamp(min_distance - touchdown_y_distance, min=0.0)
+    upper_violation = torch.zeros_like(lower_violation)
+    if max_distance is not None:
+        upper_violation = torch.clamp(touchdown_y_distance - max_distance, min=0.0)
+    foot_y_distance = torch.square(lower_violation) + torch.square(upper_violation)
     valid_foot_count = torch.clamp(state["valid_touchdown"].float().sum(dim=1), min=1.0)
     foot_y_distance = torch.sum(foot_y_distance * state["valid_touchdown"].float(), dim=1) / valid_foot_count
     no_valid_foot = ~torch.any(state["valid_touchdown"], dim=1)
@@ -1473,6 +1466,27 @@ def basic_reward(
     return reward
 
 
+def non_success_termination_penalty(
+    env: ManagerBasedRLEnv,
+    excluded_terms: Sequence[str] | str = ("task_success",),
+) -> torch.Tensor:
+    """Return 1 for non-timeout terminations except explicitly excluded terms."""
+    if isinstance(excluded_terms, str):
+        excluded_terms = (excluded_terms,)
+    excluded_term_set = set(excluded_terms)
+
+    terminated = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for term_name in env.termination_manager.active_terms:
+        if term_name in excluded_term_set:
+            continue
+        term_cfg = env.termination_manager.get_term_cfg(term_name)
+        if term_cfg.time_out:
+            continue
+        terminated |= env.termination_manager.get_term(term_name)
+
+    return terminated.float()
+
+
 def _compute_go2arm_reward_terms(
     env: ManagerBasedRLEnv,
     total_reward_term_name: str = "total_reward",
@@ -1552,15 +1566,14 @@ def _compute_go2arm_reward_terms(
     joint_limit_safety = joint_limit_safety_penalty(
         env, asset_cfg=params["mani_regularization_joint_limit_safety_asset_cfg"]
     )
-    support_left_right_x_symmetry = support_left_right_x_symmetry_penalty(
+    support_left_right_x_symmetry = support_left_right_x_symmetry_penalty(env)
+    support_left_right_y_symmetry = support_left_right_y_symmetry_penalty(env)
+    support_foot_xy_range = support_foot_xy_range_penalty(
         env,
-        max_base_lin_speed=params.get("mani_regularization_support_symmetry_max_base_lin_speed"),
-        max_base_ang_speed=params.get("mani_regularization_support_symmetry_max_base_ang_speed"),
-    )
-    support_left_right_y_symmetry = support_left_right_y_symmetry_penalty(
-        env,
-        max_base_lin_speed=params.get("mani_regularization_support_symmetry_max_base_lin_speed"),
-        max_base_ang_speed=params.get("mani_regularization_support_symmetry_max_base_ang_speed"),
+        x_abs_min=params["mani_regularization_support_foot_xy_range_x_abs_min"],
+        x_abs_max=params["mani_regularization_support_foot_xy_range_x_abs_max"],
+        y_abs_min=params["mani_regularization_support_foot_xy_range_y_abs_min"],
+        y_abs_max=params["mani_regularization_support_foot_xy_range_y_abs_max"],
     )
     mani_regularization_raw = (
         abs(params["mani_regularization_support_roll_weight"])
@@ -1587,6 +1600,8 @@ def _compute_go2arm_reward_terms(
         * (support_left_right_x_symmetry / params["mani_regularization_support_left_right_x_symmetry_std"])
         + abs(params["mani_regularization_support_left_right_y_symmetry_weight"])
         * (support_left_right_y_symmetry / params["mani_regularization_support_left_right_y_symmetry_std"])
+        + abs(params["mani_regularization_support_foot_xy_range_weight"])
+        * (support_foot_xy_range / params["mani_regularization_support_foot_xy_range_std"])
     )
     # 当前配置里这些 weight 都是负值，表示“惩罚越大，regularization 越小”。
     # 这里把线性组合后的 raw 值通过 exp 映射到 (0, 1]，从而让整个 manipulation
@@ -1631,6 +1646,9 @@ def _compute_go2arm_reward_terms(
     support_left_right_y_symmetry_weighted = abs(params["mani_regularization_support_left_right_y_symmetry_weight"]) * (
         support_left_right_y_symmetry / params["mani_regularization_support_left_right_y_symmetry_std"]
     )
+    support_foot_xy_range_weighted = abs(params["mani_regularization_support_foot_xy_range_weight"]) * (
+        support_foot_xy_range / params["mani_regularization_support_foot_xy_range_std"]
+    )
 
     # -----------------------------
     # 5) potential：保持你现在的状态项接法不变
@@ -1652,16 +1670,15 @@ def _compute_go2arm_reward_terms(
     ee_tracking_potential_weighted = params["mani_potential_weight"] * ee_tracking_potential_value
     # 当前 cumulative 在 total_reward 里是直接减项，日志里改成“已乘系数后的实际贡献”口径。
     ee_cumulative_penalty_weighted = -ee_cumulative_penalty
-    workspace_position_penalty = target_workspace_position_penalty(
+    workspace_position_reward = target_workspace_position_penalty(
         env,
         command_name=params["workspace_position_command_name"],
         x_min=params["workspace_position_x_min"],
         x_max=params["workspace_position_x_max"],
         y_weight=params["workspace_position_y_weight"],
         std=params["workspace_position_std"],
-        clip_max=params["workspace_position_clip_max"],
     )
-    workspace_position_penalty_weighted = -abs(params["workspace_position_weight"]) * workspace_position_penalty
+    workspace_position_reward_weighted = abs(params["workspace_position_weight"]) * workspace_position_reward
 
     mani_total = (
         mani_regularization * (1.0 + ee_position_enhanced + ee_position_raw * ee_orientation_enhanced)
@@ -1726,6 +1743,7 @@ def _compute_go2arm_reward_terms(
     touchdown_foot_y_distance = touchdown_foot_y_distance_penalty(
         env,
         min_distance=params["loco_regularization_touchdown_foot_y_distance_min_distance"],
+        max_distance=params.get("loco_regularization_touchdown_foot_y_distance_max_distance"),
     )
     feet_contact_soft_trot_reward_value = feet_contact_soft_trot_reward(
         env,
@@ -1739,20 +1757,10 @@ def _compute_go2arm_reward_terms(
         swing_height=params["loco_regularization_feet_contact_soft_trot_swing_height"],
         soft_contact_k=params["loco_regularization_feet_contact_soft_trot_soft_contact_k"],
         contact_force_threshold=params["loco_regularization_feet_contact_soft_trot_contact_force_threshold"],
-        support_factor_low=params["loco_regularization_feet_contact_soft_trot_support_factor_low"],
         ground_sensor_names=params["loco_regularization_feet_contact_soft_trot_ground_sensor_names"],
     )
-    feet_contact_soft_trot_support_factor_value = feet_contact_soft_trot_support_factor(
-        env,
-        sensor_cfg=params["loco_regularization_feet_contact_soft_trot_sensor_cfg"],
-        contact_force_threshold=params["loco_regularization_feet_contact_soft_trot_contact_force_threshold"],
-        support_factor_low=params["loco_regularization_feet_contact_soft_trot_support_factor_low"],
-    )
-    feet_contact_soft_trot_reward_pre_support = feet_contact_soft_trot_reward_value / torch.clamp(
-        feet_contact_soft_trot_support_factor_value, min=1.0e-6
-    )
     feet_contact_soft_trot_normalized = torch.clamp(
-        feet_contact_soft_trot_reward_pre_support
+        feet_contact_soft_trot_reward_value
         / float(len(params["loco_regularization_feet_contact_soft_trot_asset_cfg"].body_ids)),
         min=1.0e-6,
         max=1.0,
@@ -1764,6 +1772,7 @@ def _compute_go2arm_reward_terms(
     diagonal_foot_symmetry = diagonal_foot_symmetry_penalty(
         env,
         sensor_cfg=params["loco_regularization_diagonal_foot_symmetry_sensor_cfg"],
+        contact_force_threshold=params["loco_regularization_feet_contact_soft_trot_contact_force_threshold"],
     )
     moving_arm_deviation = moving_arm_default_deviation_penalty(env, asset_cfg=params["loco_arm_swing_asset_cfg"])
     moving_arm_dynamic = moving_arm_joint_velocity_penalty(env, asset_cfg=params["loco_arm_dynamic_asset_cfg"])
@@ -1822,6 +1831,10 @@ def _compute_go2arm_reward_terms(
         force_weight=params["basic_collision_force_weight"],
         force_scale=params["basic_collision_force_scale"],
     )
+    basic_termination_penalty = non_success_termination_penalty(
+        env,
+        excluded_terms=params.get("basic_termination_penalty_excluded_terms", ("task_success",)),
+    )
     basic_action_smoothness_first = action_smoothness_first_penalty(env)
     basic_action_smoothness_second = action_smoothness_second_penalty(env)
     basic_joint_torque_sq = joint_torque_sq_penalty(
@@ -1836,6 +1849,7 @@ def _compute_go2arm_reward_terms(
     )
     basic_is_alive_weighted = params["basic_is_alive_weight"] * basic_is_alive
     basic_collision_weighted = params["basic_collision_weight"] * basic_collision
+    basic_termination_penalty_weighted = params.get("basic_termination_penalty_weight", 0.0) * basic_termination_penalty
     basic_action_smoothness_first_weighted = (
         params["basic_action_smoothness_first_weight"] * basic_action_smoothness_first
     )
@@ -1847,6 +1861,7 @@ def _compute_go2arm_reward_terms(
     basic_total = (
         basic_is_alive_weighted
         + basic_collision_weighted
+        + basic_termination_penalty_weighted
         + basic_action_smoothness_first_weighted
         + basic_action_smoothness_second_weighted
         + basic_joint_torque_sq_weighted
@@ -1856,7 +1871,7 @@ def _compute_go2arm_reward_terms(
     # -----------------------------
     # 10) 总奖励
     # -----------------------------
-    total = (1.0 - gate) * mani_total + gate * loco_total + basic_total + workspace_position_penalty_weighted
+    total = (1.0 - gate) * mani_total + gate * loco_total + basic_total + workspace_position_reward_weighted
 
     # -----------------------------
     # 11) 单次计算后统一缓存，供日志直接复用
@@ -1882,11 +1897,13 @@ def _compute_go2arm_reward_terms(
         "joint_limit_safety_penalty": joint_limit_safety_weighted,
         "support_left_right_x_symmetry_penalty": support_left_right_x_symmetry_weighted,
         "support_left_right_y_symmetry_penalty": support_left_right_y_symmetry_weighted,
+        "support_foot_xy_range_penalty": support_foot_xy_range_weighted,
         "mani_regularization_raw": mani_regularization_raw,
         "mani_regularization": mani_regularization,
         "ee_tracking_potential": ee_tracking_potential_weighted,
         "ee_cumulative_tracking_error_penalty": ee_cumulative_penalty_weighted,
-        "workspace_position_penalty": workspace_position_penalty_weighted,
+        "workspace_position_penalty": workspace_position_reward_weighted,
+        "workspace_position_reward": workspace_position_reward_weighted,
         "mani_reward": (1.0 - gate) * mani_total,
         "locomotion_tracking": locomotion_tracking,
         "moving_arm_default_deviation_penalty": moving_arm_deviation_weighted,
@@ -1903,7 +1920,6 @@ def _compute_go2arm_reward_terms(
         "touchdown_left_right_y_symmetry_penalty": touchdown_left_right_y_symmetry_weighted,
         "touchdown_foot_y_distance_penalty": touchdown_foot_y_distance_weighted,
         "diagonal_foot_symmetry_penalty": diagonal_foot_symmetry_weighted,
-        "feet_contact_soft_trot_support_factor": feet_contact_soft_trot_support_factor_value,
         "feet_contact_soft_trot_weighted_gate": feet_contact_soft_trot_factor,
         "loco_regularization_base_raw": loco_regularization_base_raw,
         "loco_regularization": loco_regularization,
@@ -1915,6 +1931,7 @@ def _compute_go2arm_reward_terms(
         "basic_joint_torque_sq_penalty": basic_joint_torque_sq_weighted,
         "basic_joint_power_penalty": basic_joint_power_weighted,
         "basic_reward": basic_total,
+        "basic_termination_penalty": basic_termination_penalty_weighted,
         "total_reward_debug": total,
     }
 
@@ -1975,8 +1992,12 @@ def total_reward(
     mani_regularization_support_left_right_x_symmetry_std: object = None,
     mani_regularization_support_left_right_y_symmetry_weight: object = None,
     mani_regularization_support_left_right_y_symmetry_std: object = None,
-    mani_regularization_support_symmetry_max_base_lin_speed: object = None,
-    mani_regularization_support_symmetry_max_base_ang_speed: object = None,
+    mani_regularization_support_foot_xy_range_weight: object = None,
+    mani_regularization_support_foot_xy_range_std: object = None,
+    mani_regularization_support_foot_xy_range_x_abs_min: object = None,
+    mani_regularization_support_foot_xy_range_x_abs_max: object = None,
+    mani_regularization_support_foot_xy_range_y_abs_min: object = None,
+    mani_regularization_support_foot_xy_range_y_abs_max: object = None,
     mani_potential_command_name: object = None,
     mani_potential_std: object = None,
     mani_potential_weight: object = None,
@@ -2027,6 +2048,7 @@ def total_reward(
     loco_regularization_touchdown_foot_y_distance_weight: object = None,
     loco_regularization_touchdown_foot_y_distance_std: object = None,
     loco_regularization_touchdown_foot_y_distance_min_distance: object = None,
+    loco_regularization_touchdown_foot_y_distance_max_distance: object = None,
     loco_regularization_diagonal_foot_symmetry_weight: object = None,
     loco_regularization_diagonal_foot_symmetry_std: object = None,
     loco_regularization_diagonal_foot_symmetry_sensor_cfg: object = None,
@@ -2041,7 +2063,6 @@ def total_reward(
     loco_regularization_feet_contact_soft_trot_swing_height: object = None,
     loco_regularization_feet_contact_soft_trot_soft_contact_k: object = None,
     loco_regularization_feet_contact_soft_trot_contact_force_threshold: object = None,
-    loco_regularization_feet_contact_soft_trot_support_factor_low: object = None,
     loco_regularization_feet_contact_soft_trot_ground_sensor_names: object = None,
     loco_arm_swing_weight: object = None,
     loco_arm_swing_asset_cfg: object = None,
@@ -2054,6 +2075,8 @@ def total_reward(
     basic_collision_count_weight: object = None,
     basic_collision_force_weight: object = None,
     basic_collision_force_scale: object = None,
+    basic_termination_penalty_weight: object = None,
+    basic_termination_penalty_excluded_terms: object = None,
     basic_action_smoothness_first_weight: object = None,
     basic_action_smoothness_second_weight: object = None,
     basic_joint_torque_sq_weight: object = None,
@@ -2115,8 +2138,12 @@ def total_reward(
         mani_regularization_support_left_right_x_symmetry_std,
         mani_regularization_support_left_right_y_symmetry_weight,
         mani_regularization_support_left_right_y_symmetry_std,
-        mani_regularization_support_symmetry_max_base_lin_speed,
-        mani_regularization_support_symmetry_max_base_ang_speed,
+        mani_regularization_support_foot_xy_range_weight,
+        mani_regularization_support_foot_xy_range_std,
+        mani_regularization_support_foot_xy_range_x_abs_min,
+        mani_regularization_support_foot_xy_range_x_abs_max,
+        mani_regularization_support_foot_xy_range_y_abs_min,
+        mani_regularization_support_foot_xy_range_y_abs_max,
         mani_potential_command_name,
         mani_potential_std,
         mani_potential_weight,
@@ -2167,6 +2194,7 @@ def total_reward(
         loco_regularization_touchdown_foot_y_distance_weight,
         loco_regularization_touchdown_foot_y_distance_std,
         loco_regularization_touchdown_foot_y_distance_min_distance,
+        loco_regularization_touchdown_foot_y_distance_max_distance,
         loco_regularization_diagonal_foot_symmetry_weight,
         loco_regularization_diagonal_foot_symmetry_std,
         loco_regularization_diagonal_foot_symmetry_sensor_cfg,
@@ -2181,7 +2209,6 @@ def total_reward(
         loco_regularization_feet_contact_soft_trot_swing_height,
         loco_regularization_feet_contact_soft_trot_soft_contact_k,
         loco_regularization_feet_contact_soft_trot_contact_force_threshold,
-        loco_regularization_feet_contact_soft_trot_support_factor_low,
         loco_regularization_feet_contact_soft_trot_ground_sensor_names,
         loco_arm_swing_weight,
         loco_arm_swing_asset_cfg,
@@ -2194,6 +2221,8 @@ def total_reward(
         basic_collision_count_weight,
         basic_collision_force_weight,
         basic_collision_force_scale,
+        basic_termination_penalty_weight,
+        basic_termination_penalty_excluded_terms,
         basic_action_smoothness_first_weight,
         basic_action_smoothness_second_weight,
         basic_joint_torque_sq_weight,
@@ -2786,28 +2815,42 @@ def feet_slide(
     return reward
 
 
+def _effective_action_history(env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Return action history after environment-side action masks when available."""
+    current = getattr(env, "_go2arm_effective_action", None)
+    previous = getattr(env, "_go2arm_prev_effective_action", None)
+    previous_previous = getattr(env, "_go2arm_prev_prev_effective_action", None)
+    if current is not None and previous is not None:
+        return current, previous, previous_previous
+    return (
+        env.action_manager.action,
+        env.action_manager.prev_action,
+        getattr(env.action_manager, "prev_prev_action", None),
+    )
+
+
 def action_smoothness_first_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Penalty on first-order action changes."""
     # 一阶平滑项：惩罚当前动作和上一步动作之间的跳变。
-    diff = torch.square(env.action_manager.action - env.action_manager.prev_action)
+    action, prev_action, _ = _effective_action_history(env)
+    diff = torch.square(action - prev_action)
     # 第一步没有有效上一时刻动作时，不对这一项计惩罚。
-    diff = diff * (env.action_manager.prev_action[:, :] != 0)
+    diff = diff * (prev_action[:, :] != 0)
     return torch.sum(diff, dim=1)
 
 
 def action_smoothness_second_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Penalty on second-order action changes."""
     # 二阶平滑项：惩罚动作离散二阶差分，抑制动作抖动和“折线感”。
-    if not hasattr(env.action_manager, "prev_prev_action"):
+    action, prev_action, prev_prev_action = _effective_action_history(env)
+    if prev_prev_action is None:
         # 兼容旧版 IsaacLab：ActionManager 只维护一阶历史时，无法可靠计算二阶差分，
         # 因此这里返回零惩罚而不是伪造历史，避免改变奖励语义。
         return torch.zeros(env.num_envs, device=env.device)
-    diff = torch.square(
-        env.action_manager.action - 2 * env.action_manager.prev_action + env.action_manager.prev_prev_action
-    )
+    diff = torch.square(action - 2 * prev_action + prev_prev_action)
     # 前两步历史不足时，不对二阶项计惩罚。
-    diff = diff * (env.action_manager.prev_action[:, :] != 0)
-    diff = diff * (env.action_manager.prev_prev_action[:, :] != 0)
+    diff = diff * (prev_action[:, :] != 0)
+    diff = diff * (prev_prev_action[:, :] != 0)
     return torch.sum(diff, dim=1)
 
 
@@ -2910,3 +2953,248 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     reward = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
     reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+class RoboDuetReward(ManagerTermBase):
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        pretrained_scales: dict[str, float],
+        hybrid_scales: dict[str, float],
+        only_positive_rewards: bool,
+        only_positive_rewards_ji22_style: bool,
+        sigma_rew_neg: float,
+        tracking_sigma: float,
+        tracking_sigma_yaw: float,
+        gait_force_sigma: float,
+        gait_vel_sigma: float,
+        illegal_contact_sensor_cfg: SceneEntityCfg,
+        foot_sensor_cfg: SceneEntityCfg,
+        foot_asset_cfg: SceneEntityCfg,
+        leg_joint_cfg: SceneEntityCfg,
+        arm_joint_cfg: SceneEntityCfg,
+        base_body_cfg: SceneEntityCfg,
+        ee_body_cfg: SceneEntityCfg,
+        manip_weight_lpy: float,
+        manip_weight_rpy: float,
+    ) -> torch.Tensor:
+        del base_body_cfg
+        term = env.command_manager.get_term(command_name)
+        scales = hybrid_scales if term.switch_open else pretrained_scales
+        robot: Articulation = env.scene["robot"]
+        reward_dog = torch.zeros(env.num_envs, device=env.device)
+        reward_arm = torch.zeros(env.num_envs, device=env.device)
+        reward_pos_dog = torch.zeros(env.num_envs, device=env.device)
+        reward_neg_dog = torch.zeros(env.num_envs, device=env.device)
+        reward_pos_arm = torch.zeros(env.num_envs, device=env.device)
+        reward_neg_arm = torch.zeros(env.num_envs, device=env.device)
+        foot_forces = get_go2arm_precise_foot_normal_forces(env, foot_sensor_cfg)
+        if foot_forces is None:
+            raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
+        foot_velocities = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_center_lin_vel_w"]
+        root_lin_vel_b = robot.data.root_lin_vel_b
+        root_ang_vel_b = robot.data.root_ang_vel_b
+        desired_contact = term.desired_contact_states
+
+        metrics: dict[str, torch.Tensor] = {}
+        metrics["tracking_lin_vel"] = torch.exp(
+            -torch.sum(torch.square(term.commands_dog[:, :2] - root_lin_vel_b[:, :2]), dim=1) / tracking_sigma
+        )
+        metrics["tracking_ang_vel"] = torch.exp(
+            -torch.square(term.commands_dog[:, 2] - root_ang_vel_b[:, 2]) / tracking_sigma_yaw
+        )
+        metrics["lin_vel_z"] = torch.square(root_lin_vel_b[:, 2])
+        metrics["ang_vel_xy"] = torch.sum(torch.square(root_ang_vel_b[:, :2]), dim=1)
+        quat_roll = quat_from_euler_xyz(
+            -term.commands_dog[:, 4], torch.zeros_like(term.commands_dog[:, 4]), torch.zeros_like(term.commands_dog[:, 4])
+        )
+        quat_pitch = quat_from_euler_xyz(
+            torch.zeros_like(term.commands_dog[:, 3]), -term.commands_dog[:, 3], torch.zeros_like(term.commands_dog[:, 3])
+        )
+        desired_base_quat = quat_mul(quat_roll, quat_pitch)
+        desired_projected_gravity = quat_apply_inverse(
+            desired_base_quat,
+            torch.tensor([0.0, 0.0, -1.0], device=env.device, dtype=robot.data.projected_gravity_b.dtype).expand(
+                env.num_envs, 3
+            ),
+        )
+        metrics["orientation_control"] = torch.sum(
+            torch.square(robot.data.projected_gravity_b[:, :2] - desired_projected_gravity[:, :2]),
+            dim=1,
+        )
+        metrics["loco_energy"] = torch.sum(
+            torch.square(
+                robot.data.applied_torque[:, leg_joint_cfg.joint_ids] * robot.data.joint_vel[:, leg_joint_cfg.joint_ids]
+            ),
+            dim=1,
+        )
+        metrics["feet_slip"] = torch.sum(
+            (foot_forces > 1.0).float() * torch.sum(torch.square(foot_velocities[:, :, :2]), dim=2),
+            dim=1,
+        )
+        phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
+        ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SENSOR_NAMES)
+        contact_point_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2] - 0.022
+        ground_height = torch.where(ground_height_data["is_valid"], ground_height_data["ground_height_w"], contact_point_height)
+        foot_height = contact_point_height - ground_height
+        target_height = 0.04 * phases + 0.02
+        metrics["feet_clearance_cmd_linear"] = torch.sum(
+            torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
+        )
+        metrics["tracking_contacts_shaped_force"] = -torch.sum(
+            (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_forces) / gait_force_sigma)),
+            dim=1,
+        ) / 4.0
+        metrics["tracking_contacts_shaped_vel"] = -torch.sum(
+            desired_contact * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
+            dim=1,
+        ) / 4.0
+        illegal_sensor = env.scene.sensors[illegal_contact_sensor_cfg.name]
+        illegal_forces = illegal_sensor.data.net_forces_w[:, illegal_contact_sensor_cfg.body_ids, :]
+        metrics["collision"] = torch.sum((torch.norm(illegal_forces, dim=-1) > 0.1).float(), dim=1)
+        current_lpy = roboduet_current_lpy(env, ee_body_cfg)
+        current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
+        lpy_range = torch.tensor(
+            [
+                term.cfg.l_range[1] - term.cfg.l_range[0],
+                term.cfg.p_range[1] - term.cfg.p_range[0],
+                term.cfg.y_range[1] - term.cfg.y_range[0],
+            ],
+            device=env.device,
+            dtype=current_lpy.dtype,
+        ).unsqueeze(0)
+        rpy_range = torch.tensor(
+            [
+                term.cfg.roll_ee_range[1] - term.cfg.roll_ee_range[0],
+                term.cfg.pitch_ee_range[1] - term.cfg.pitch_ee_range[0],
+                term.cfg.yaw_ee_range[1] - term.cfg.yaw_ee_range[0],
+            ],
+            device=env.device,
+            dtype=current_abg.dtype,
+        ).unsqueeze(0)
+        lpy_error = torch.sum(torch.abs(current_lpy - term.commands_arm_obs[:, :3]) / lpy_range, dim=1)
+        rpy_error = torch.sum(torch.abs(current_abg - term.target_abg) / rpy_range, dim=1)
+        metrics["arm_manip_commands_tracking_combine"] = torch.exp(
+            -(manip_weight_lpy * lpy_error + manip_weight_rpy * rpy_error)
+        )
+        metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
+        metrics["arm_energy"] = torch.sum(
+            torch.square(
+                robot.data.applied_torque[:, arm_joint_cfg.joint_ids] * robot.data.joint_vel[:, arm_joint_cfg.joint_ids]
+            ),
+            dim=1,
+        )
+        prev_joint_vel = getattr(env, "_roboduet_prev_joint_vel", torch.zeros_like(robot.data.joint_vel))
+        metrics["arm_dof_acc"] = torch.sum(
+            torch.square(
+                (prev_joint_vel[:, arm_joint_cfg.joint_ids] - robot.data.joint_vel[:, arm_joint_cfg.joint_ids])
+                / env.step_dt
+            ),
+            dim=1,
+        )
+        metrics["arm_action_rate"] = torch.sum(
+            torch.square(
+                env.action_manager.prev_action[:, arm_joint_cfg.joint_ids]
+                - env.action_manager.action[:, arm_joint_cfg.joint_ids]
+            ),
+            dim=1,
+        )
+        plan_actions = getattr(env, "plan_actions", torch.zeros(env.num_envs, 2, device=env.device))
+        last_plan_actions = getattr(env, "last_plan_actions", torch.zeros_like(plan_actions))
+        metrics["arm_control_limits"] = (
+            torch.clamp(term.cfg.limit_body_pitch[0] - plan_actions[:, 0], min=0.0)
+            + torch.clamp(plan_actions[:, 0] - term.cfg.limit_body_pitch[1], min=0.0)
+            + torch.clamp(term.cfg.limit_body_roll[0] - plan_actions[:, 1], min=0.0)
+            + torch.clamp(plan_actions[:, 1] - term.cfg.limit_body_roll[1], min=0.0)
+        )
+        plan_action_valid = (last_plan_actions != 0.0).float()
+        metrics["arm_control_smoothness_1"] = torch.sum(
+            torch.square(plan_actions - last_plan_actions) * plan_action_valid,
+            dim=1,
+        )
+        metrics["dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, leg_joint_cfg.joint_ids]), dim=1)
+        metrics["dof_acc"] = torch.sum(
+            torch.square(
+                (prev_joint_vel[:, leg_joint_cfg.joint_ids] - robot.data.joint_vel[:, leg_joint_cfg.joint_ids])
+                / env.step_dt
+            ),
+            dim=1,
+        )
+        metrics["action_rate"] = torch.sum(
+            torch.square(
+                env.action_manager.prev_action[:, leg_joint_cfg.joint_ids]
+                - env.action_manager.action[:, leg_joint_cfg.joint_ids]
+            ),
+            dim=1,
+        )
+        joint_pos_target = getattr(env, "_go2arm_joint_pos_target", torch.zeros_like(env.action_manager.action))
+        last_joint_pos_target = getattr(env, "_go2arm_last_joint_pos_target", torch.zeros_like(joint_pos_target))
+        last_last_joint_pos_target = getattr(env, "_go2arm_last_last_joint_pos_target", torch.zeros_like(joint_pos_target))
+        leg_valid = (env.action_manager.prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
+        leg_valid_2 = (env.action_manager.prev_prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
+        arm_valid = (env.action_manager.prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
+        arm_valid_2 = (env.action_manager.prev_prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
+        metrics["action_smoothness_1"] = torch.sum(
+            torch.square(joint_pos_target[:, leg_joint_cfg.joint_ids] - last_joint_pos_target[:, leg_joint_cfg.joint_ids])
+            * leg_valid,
+            dim=1,
+        )
+        metrics["action_smoothness_2"] = torch.sum(
+            torch.square(
+                joint_pos_target[:, leg_joint_cfg.joint_ids]
+                - 2.0 * last_joint_pos_target[:, leg_joint_cfg.joint_ids]
+                + last_last_joint_pos_target[:, leg_joint_cfg.joint_ids]
+            )
+            * leg_valid
+            * leg_valid_2,
+            dim=1,
+        )
+        metrics["arm_action_smoothness_1"] = torch.sum(
+            torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids] - last_joint_pos_target[:, arm_joint_cfg.joint_ids])
+            * arm_valid,
+            dim=1,
+        )
+        metrics["arm_action_smoothness_2"] = torch.sum(
+            torch.square(
+                joint_pos_target[:, arm_joint_cfg.joint_ids]
+                - 2.0 * last_joint_pos_target[:, arm_joint_cfg.joint_ids]
+                + last_last_joint_pos_target[:, arm_joint_cfg.joint_ids]
+            )
+            * arm_valid
+            * arm_valid_2,
+            dim=1,
+        )
+        metrics["torques"] = torch.sum(torch.square(robot.data.applied_torque[:, leg_joint_cfg.joint_ids]), dim=1)
+        metrics["hip_action_l2"] = torch.sum(torch.square(roboduet_current_action(env)[:, [0, 3, 6, 9]]), dim=1)
+
+        for name, scale in scales.items():
+            if name not in metrics:
+                continue
+            rew = float(scale) * metrics[name]
+            reward_dog += rew
+            if torch.sum(rew) >= 0:
+                reward_pos_dog += rew
+            elif torch.sum(rew) <= 0:
+                reward_neg_dog += rew
+            if name not in ("tracking_lin_vel", "tracking_ang_vel"):
+                reward_arm += rew
+                if torch.sum(rew) >= 0:
+                    reward_pos_arm += rew
+                elif torch.sum(rew) <= 0:
+                    reward_neg_arm += rew
+            if name in GO2ARM_COMMAND_CURRICULUM_KEYS:
+                if name in ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel"):
+                    term.accumulate_metric(name, float(scale) + rew)
+                else:
+                    term.accumulate_metric(name, rew)
+        if only_positive_rewards:
+            reward_dog = torch.clamp(reward_dog, min=0.0)
+            reward_arm = torch.clamp(reward_arm, min=0.0)
+        elif only_positive_rewards_ji22_style:
+            reward_dog = reward_pos_dog * torch.exp(reward_neg_dog / float(sigma_rew_neg))
+            reward_arm = reward_pos_arm * torch.exp(reward_neg_arm / float(sigma_rew_neg))
+        env._roboduet_reward_dog = reward_dog.detach().clone()
+        env._roboduet_reward_arm = reward_arm.detach().clone()
+        env._roboduet_prev_joint_vel = robot.data.joint_vel.detach().clone()
+        return reward_dog

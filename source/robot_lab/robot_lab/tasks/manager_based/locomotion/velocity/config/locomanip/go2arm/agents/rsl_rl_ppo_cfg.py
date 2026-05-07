@@ -3,145 +3,103 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg,
-    RslRlPpoActorCriticCfg,
-    RslRlPpoAlgorithmCfg,
-    RslRlSymmetryCfg,
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
+
+_RUNNER_MODULE = (
+    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner"
 )
-
-from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.rough_env_cfg import (
-    GO2ARM_LOCO_STAGE_END_ITERATION,
-    UnitreeGo2ArmRoughEnvCfg,
+_MODEL_MODULE = (
+    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_models"
 )
-from robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry import go2arm
-
-
-def _resolve_init_noise_std(*, allow_vector: bool) -> float | tuple[float, ...]:
-    """Read the rough-config init std and optionally collapse vector settings for legacy scalar-only policies."""
-    init_noise_std = getattr(UnitreeGo2ArmRoughEnvCfg, "rsl_rl_init_noise_std", None)
-    if init_noise_std is None:
-        init_noise_std = getattr(UnitreeGo2ArmRoughEnvCfg(), "rsl_rl_init_noise_std", None)
-    if init_noise_std is None:
-        raise AttributeError("UnitreeGo2ArmRoughEnvCfg.rsl_rl_init_noise_std is not defined.")
-    if allow_vector or isinstance(init_noise_std, float):
-        return init_noise_std
-    return float(sum(init_noise_std) / len(init_noise_std))
+_ALGORITHM_MODULE = (
+    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_ppo"
+)
 
 
 @configclass
-class UnitreeGo2ArmRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 24
-    max_iterations = 20000
-    save_interval = 50
-    experiment_name = "unitree_go2arm_rough"
-    go2arm_mani_phase_reset_iteration = GO2ARM_LOCO_STAGE_END_ITERATION
-    go2arm_mani_phase_reset_arm_action_indices = tuple(range(12, 18))
-    go2arm_mani_phase_reset_arm_std = 0.4
-    go2arm_mani_phase_reset_learning_rate = 3.0e-4
+class RoboDuetAutomaticDogModelCfg:
+    """RoboDuet `auto_train` 中 dog actor-critic 的配置。"""
 
-    policy = RslRlPpoActorCriticCfg(
-        # 先降低早期探索噪声，减少高噪声绝对位置动作带来的无效碰撞。
-        init_noise_std=_resolve_init_noise_std(allow_vector=False),
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
-        activation="elu",
-    )
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.002,
-        num_learning_epochs=8,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
+    class_name: str = f"{_MODEL_MODULE}:DogActorCritic"
+    history_length: int = 30
+    num_actions: int = 12
+    init_noise_std: float = 1.0
+    actor_hidden_dims: list[int] = [512, 256, 128]
+    critic_hidden_dims: list[int] = [512, 256, 128]
+    activation: str = "elu"
+    adaptation_module_branch_hidden_dims: list[int] = [256, 128]
 
 
 @configclass
-class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 24
-    max_iterations = 20000
-    save_interval = 50
-    experiment_name = "unitree_go2arm_teacher_rough"
-    go2arm_mani_phase_reset_iteration = GO2ARM_LOCO_STAGE_END_ITERATION
-    go2arm_mani_phase_reset_arm_action_indices = tuple(range(12, 18))
-    go2arm_mani_phase_reset_arm_std = 0.4
-    go2arm_mani_phase_reset_learning_rate = 3.0e-4
+class RoboDuetAutomaticArmModelCfg:
+    """RoboDuet `auto_train` 中 arm actor-critic 的配置。"""
 
-    # isaaclab_rl 0.4.x still supports remapping observation groups even though the policy
-    # must be configured through the legacy single ActorCritic entry point.
-    obs_groups = {
-        "actor": ["policy", "privileged"],
-        "critic": ["policy", "privileged", "critic_extra"],
+    class_name: str = f"{_MODEL_MODULE}:ArmActorCritic"
+    history_length: int = 30
+    num_actions: int = 6
+    num_plan_actions: int = 2
+    init_noise_std: float = 0.1
+    actor_hidden_dims: list[int] = [512, 256, 128]
+    critic_hidden_dims: list[int] = [512, 256, 128]
+    activation: str = "elu"
+    adaptation_module_branch_hidden_dims: list[int] = [256, 128]
+
+
+@configclass
+class RoboDuetAutomaticPpoAlgorithmCfg:
+    """RoboDuet `auto_train` 的单策略 PPO 配置。"""
+
+    class_name: str = f"{_ALGORITHM_MODULE}:AutomaticPPO"
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+    entropy_coef: float = 0.01
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 5.0e-4
+    adaptation_module_learning_rate: float = 5.0e-4
+    num_adaptation_module_substeps: int = 1
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    desired_kl: float = 0.01
+    max_grad_norm: float = 1.0
+    selective_adaptation_module_loss: bool = False
+
+
+@configclass
+class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlBaseRunnerCfg):
+    """go2arm 默认训练入口，严格对齐 Roboduet `auto_train`。"""
+
+    class_name: str = f"{_RUNNER_MODULE}:RoboDuetAutomaticRunner"
+    num_steps_per_env: int = 24
+    max_iterations: int = 100000
+    save_interval: int = 400
+    empirical_normalization: bool = False
+    experiment_name: str = "roboduet_go2arm_rough"
+    run_name: str = ""
+    clip_actions: float | None = None
+    obs_groups: dict[str, list[str]] = {
+        "dog_policy": ["dog_policy"],
+        "dog_privileged": ["dog_privileged"],
+        "arm_policy": ["arm_policy"],
+        "arm_privileged": ["arm_privileged"],
     }
-
-    policy = RslRlPpoActorCriticCfg(
-        class_name=(
-            '__import__("robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.'
-            'legacy_actor_critic", fromlist=["PrivilegedTeacherActorCritic"]).PrivilegedTeacherActorCritic'
-        ),
-        # teacher 版本同样先降低早期探索噪声，优先观察姿态/接触问题而不是纯噪声扰动。
-        init_noise_std=_resolve_init_noise_std(allow_vector=True),
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
-        activation="elu",
-    )
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.002,
-        num_learning_epochs=8,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
+    algorithm: RoboDuetAutomaticPpoAlgorithmCfg = RoboDuetAutomaticPpoAlgorithmCfg()
+    dog_model: RoboDuetAutomaticDogModelCfg = RoboDuetAutomaticDogModelCfg()
+    arm_model: RoboDuetAutomaticArmModelCfg = RoboDuetAutomaticArmModelCfg()
+    roboduet_pretrained_dog_checkpoint: str | None = None
+    roboduet_pretrained_arm_checkpoint: str | None = None
+    roboduet_stage_switch_iteration: int | None = None
+    roboduet_disable_two_stage: bool = False
+    roboduet_export_deploy_models: bool = True
+    resume: bool = False
+    load_run: str = ".*"
+    load_checkpoint: str = "model_.*.pt"
 
 
 @configclass
 class UnitreeGo2ArmFlatPPORunnerCfg(UnitreeGo2ArmTeacherRoughPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
-        self.max_iterations = 10000
-        self.experiment_name = "unitree_go2arm_teacher_flat"
-
-
-@configclass
-class UnitreeGo2ArmFlatPPORunnerWithSymmetryCfg(UnitreeGo2ArmFlatPPORunnerCfg):
-    """Flat Go2Arm PPO config with world-XZ mirror data augmentation."""
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.002,
-        num_learning_epochs=8,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-        symmetry_cfg=RslRlSymmetryCfg(
-            use_data_augmentation=True,
-            use_mirror_loss=False,
-            data_augmentation_func=go2arm.compute_symmetric_states,
-        ),
-    )
+        self.experiment_name = "roboduet_go2arm_flat"

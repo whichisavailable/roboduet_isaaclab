@@ -11,6 +11,8 @@ from isaaclab.sensors import ContactSensor, RayCaster
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
+from .observations import _get_command_term, _ground_height_under_base, _quat_to_roll_pitch
+
 
 def _persistent_violation(
     env,
@@ -42,7 +44,19 @@ def _root_height_over_terrain(
     """计算机身相对地面的高度。"""
 
     asset: RigidObject = env.scene[asset_cfg.name]
-    root_height = asset.data.root_pos_w[:, 2]
+    body_ids = getattr(asset_cfg, "body_ids", None)
+    if body_ids is None:
+        root_height = asset.data.root_pos_w[:, 2]
+    else:
+        try:
+            if len(body_ids) == 0:
+                root_height = asset.data.root_pos_w[:, 2]
+            else:
+                root_height = asset.data.body_pos_w[:, body_ids, 2]
+        except TypeError:
+            root_height = asset.data.body_pos_w[:, body_ids, 2]
+        if root_height.ndim > 1:
+            root_height = torch.mean(root_height, dim=1)
 
     if sensor_cfg is not None:
         sensor: RayCaster = env.scene[sensor_cfg.name]
@@ -163,50 +177,57 @@ def joint_velocity_termination(
 
 def joint_torque_termination(
     env,
-    soft_max_ratio: float,
-    hard_max_ratio: float | None,
+    soft_max_ratio: float | None = None,
+    hard_max_ratio: float | None = None,
+    soft_max_violation: float | None = None,
+    hard_max_violation: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     consecutive_steps: int = 3,
 ) -> torch.Tensor:
-    """Terminate on sustained single-joint actuator torque clipping."""
+    """Terminate on sustained actuator torque clipping."""
 
     asset = env.scene[asset_cfg.name]
     joint_ids = asset_cfg.joint_ids
-    torque_dtype = asset.data.computed_torque.dtype
+    torque_clipping = torch.abs(asset.data.computed_torque[:, joint_ids] - asset.data.applied_torque[:, joint_ids])
 
-    effort_limits = torch.full_like(asset.data.computed_torque, torch.inf)
-    for actuator in asset.actuators.values():
-        actuator_joint_ids = torch.as_tensor(actuator.joint_indices, device=env.device, dtype=torch.long)
-        actuator_effort_limit = actuator.effort_limit
-        if not isinstance(actuator_effort_limit, torch.Tensor):
-            actuator_effort_limit = torch.full(
-                (env.num_envs, actuator_joint_ids.numel()),
-                float(actuator_effort_limit),
-                device=env.device,
-                dtype=torque_dtype,
-            )
-        else:
-            actuator_effort_limit = actuator_effort_limit.to(device=env.device, dtype=torque_dtype)
-            if actuator_effort_limit.dim() == 0:
-                actuator_effort_limit = actuator_effort_limit.reshape(1, 1).expand(
-                    env.num_envs, actuator_joint_ids.numel()
+    if soft_max_ratio is not None:
+        torque_dtype = asset.data.computed_torque.dtype
+        effort_limits = torch.full_like(asset.data.computed_torque, torch.inf)
+        for actuator in asset.actuators.values():
+            actuator_joint_ids = torch.as_tensor(actuator.joint_indices, device=env.device, dtype=torch.long)
+            actuator_effort_limit = actuator.effort_limit
+            if not isinstance(actuator_effort_limit, torch.Tensor):
+                actuator_effort_limit = torch.full(
+                    (env.num_envs, actuator_joint_ids.numel()),
+                    float(actuator_effort_limit),
+                    device=env.device,
+                    dtype=torque_dtype,
                 )
-            elif actuator_effort_limit.dim() == 1:
-                actuator_effort_limit = actuator_effort_limit.unsqueeze(0).expand(env.num_envs, -1)
-        effort_limits[:, actuator_joint_ids] = actuator_effort_limit
+            else:
+                actuator_effort_limit = actuator_effort_limit.to(device=env.device, dtype=torque_dtype)
+                if actuator_effort_limit.dim() == 0:
+                    actuator_effort_limit = actuator_effort_limit.reshape(1, 1).expand(
+                        env.num_envs, actuator_joint_ids.numel()
+                    )
+                elif actuator_effort_limit.dim() == 1:
+                    actuator_effort_limit = actuator_effort_limit.unsqueeze(0).expand(env.num_envs, -1)
+            effort_limits[:, actuator_joint_ids] = actuator_effort_limit
 
-    selected_effort_limits = torch.clamp(effort_limits[:, joint_ids], min=1.0e-6)
-    torque_clipping = torch.abs(
-        asset.data.computed_torque[:, joint_ids] - asset.data.applied_torque[:, joint_ids]
-    )
-    max_torque_clipping_ratio = torch.max(torque_clipping / selected_effort_limits, dim=1)[0]
+        selected_effort_limits = torch.clamp(effort_limits[:, joint_ids], min=1.0e-6)
+        violation = torch.max(torque_clipping / selected_effort_limits, dim=1)[0]
+        soft_threshold = soft_max_ratio
+        hard_threshold = hard_max_ratio
+    else:
+        if soft_max_violation is None:
+            raise ValueError("joint_torque_termination requires either soft_max_ratio or soft_max_violation.")
+        violation = torch.sum(torque_clipping, dim=1)
+        soft_threshold = soft_max_violation
+        hard_threshold = hard_max_violation
 
     hard_violation = (
-        max_torque_clipping_ratio > hard_max_ratio
-        if hard_max_ratio is not None
-        else torch.zeros_like(max_torque_clipping_ratio, dtype=torch.bool)
+        violation > hard_threshold if hard_threshold is not None else torch.zeros_like(violation, dtype=torch.bool)
     )
-    soft_violation = max_torque_clipping_ratio > soft_max_ratio
+    soft_violation = violation > soft_threshold
     return hard_violation | _persistent_violation(
         env=env,
         violation_mask=soft_violation,
@@ -245,3 +266,38 @@ def task_success_termination(
         counter_name="_termination_success_counter",
         consecutive_steps=consecutive_steps,
     )
+
+
+def roboduet_body_height_termination(
+    env,
+    minimum_height: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg | None = None,
+) -> torch.Tensor:
+    asset: RigidObject = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2]
+    if sensor_cfg is not None and sensor_cfg.name in env.scene.sensors:
+        height = height - _ground_height_under_base(env)
+    return height < minimum_height
+
+
+def roboduet_reverse_termination(
+    env,
+    command_name: str,
+    roll_limit: float,
+    pitch_limit: float,
+    headupdown_thres: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    term = _get_command_term(env, command_name)
+    if not term.switch_open:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    roll, pitch = _quat_to_roll_pitch(asset.data.root_quat_w)
+    reverse = torch.logical_and(roll > roll_limit, term.commands_arm[:, 2] > 0.0)
+    reverse |= torch.logical_and(roll < -roll_limit, term.commands_arm[:, 2] < 0.0)
+    delta_z = term.commands_arm[:, 0] * torch.sin(term.commands_arm[:, 1]) + 0.38 - asset.data.root_pos_w[:, 2]
+    reverse |= torch.logical_and(pitch < -pitch_limit, delta_z < -headupdown_thres)
+    reverse |= torch.logical_and(pitch > pitch_limit, delta_z > headupdown_thres)
+    time_exceed = term.arm_time / torch.clamp(term.T_trajs, min=1.0e-6) > 0.6
+    return reverse & time_exceed
