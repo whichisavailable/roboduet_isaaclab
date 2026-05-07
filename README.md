@@ -144,6 +144,152 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 
 
 
+### RoboDuet Alignment Notes
+
+Checked against the local upstream clone at `_tmp_roboduet_upstream`.
+
+- Training-stage defaults are aligned with upstream `scripts/auto_train.py`: the two-stage switch is `10000` iterations from scratch and `2000` when both dog/arm pretrained checkpoints are provided.
+- The local port keeps the upstream `dog_policy` / `dog_privileged` / `arm_policy` / `arm_privileged` split, the same arm `6 + 2` output layout, and the same reward-scale tables.
+- Two implementation details are intentionally not byte-identical:
+  - stage1 arm freeze is implemented by masking arm action deltas to zero inside the IsaacLab action term, instead of directly overwriting DOF state every physics step as upstream does;
+  - foot-contact handling is stricter locally because four dedicated foot sensors are used to recover precise legal support contacts.
+
+#### 1. Privileged Information
+
+For the RoboDuet task in `config/locomanip/go2arm/rough_env_cfg.py`:
+
+- `dog_privileged`: 2 dims
+  - mean foot friction
+  - mean foot restitution
+- `arm_privileged`: 9 dims
+  - mean foot friction
+  - mean foot restitution
+  - current `l, p, y` of the grasper in the yaw-aligned base frame
+  - current end-effector quaternion in the yaw-aligned base frame
+
+This matches upstream `dog_num_privileged_obs = 2` and `arm_num_privileged_obs = 9`.
+
+#### 2. Rewards
+
+Stage1 uses `PRETRAINED_REWARD_SCALES`. After the RoboDuet stage switch, rewards change to `HYBRID_REWARD_SCALES`.
+
+Dog-stage / shared terms:
+
+- `tracking_lin_vel = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`
+- `tracking_ang_vel = exp(-(cmd_yaw - w_z_body)^2 / 0.25)`
+- `lin_vel_z = vz_body^2`
+- `ang_vel_xy = wx_body^2 + wy_body^2`
+- `orientation_control`: projected-gravity mismatch to the commanded body pitch/roll
+- `loco_energy`: sum of squared leg joint power
+- `feet_slip`: support-foot planar velocity penalty
+- `feet_clearance_cmd_linear`: swing-foot height tracking penalty
+- `tracking_contacts_shaped_force`: swing phase should have low contact force
+- `tracking_contacts_shaped_vel`: stance phase should have low foot velocity
+- `collision`: illegal non-foot contact count
+- `dof_vel`, `dof_acc`: leg joint velocity / acceleration penalties
+- `action_rate`: leg action difference penalty
+- `action_smoothness_1`, `action_smoothness_2`: first/second-order leg target smoothness penalties
+- `torques`: squared leg torque penalty
+- `hip_action_l2`: squared hip action penalty
+
+Arm / hybrid-only extra terms:
+
+- `arm_manip_commands_tracking_combine = exp(-(3 * lpy_error + 1 * rpy_error))`
+  - `lpy_error` is normalized by sampled `l/p/y` range
+  - `rpy_error` is normalized by sampled `roll/pitch/yaw` range after conversion to upstream `abg`
+- `arm_energy`: squared arm joint power
+- `arm_dof_vel`, `arm_dof_acc`: arm joint velocity / acceleration penalties
+- `arm_action_rate`: arm action difference penalty
+- `arm_action_smoothness_1`, `arm_action_smoothness_2`: first/second-order arm target smoothness penalties
+- `arm_control_smoothness_1`: plan-action smoothness penalty on the extra `pitch/roll` planner outputs
+- `arm_control_limits`: penalty when planner outputs exceed commanded body pitch/roll limits
+
+Final aggregation follows upstream:
+
+- every enabled metric is multiplied by its stage-specific scale and added to the dog reward
+- all terms except `tracking_lin_vel` and `tracking_ang_vel` are also added to the arm reward
+- final reward uses the Ji22-style positive/negative composition:
+  - `reward = reward_pos * exp(reward_neg / sigma_rew_neg)`, with `sigma_rew_neg = 0.02`
+
+#### 3. Command Sampling, Filtering, Resampling, Frames
+
+Locomotion command:
+
+- sampled from the RoboDuet curriculum bins over
+  - `x in [-1.0, 1.0]`
+  - `y in [-0.6, 0.6]`
+  - `yaw in [-1.0, 1.0]`
+  - stage1-only body pitch/roll bins in `[-0.4, 0.4]`
+- 10% of sampled velocity commands are forced to zero
+- tiny commands are thresholded to zero:
+  - `|x| <= 0.07`
+  - `|y| <= 0.07`
+  - `|yaw| <= 0.10`
+- resampled every `10.0s` inside an episode, and also on reset
+
+Arm command:
+
+- sampled uniformly, with no extra reject-cuboid or IK/workspace filter:
+  - `l in [0.3, 0.77]`
+  - `p in [-0.45pi, 0.45pi]`
+  - `y in [-pi/2, pi/2]`
+  - `roll in [-0.45pi, 0.45pi]`
+  - `pitch in [-60deg, 60deg]`
+  - `yaw in [-75deg, 75deg]`
+- resampled on reset and then every `T_traj ~ U(2.0, 3.0)s`
+- arm resampling is disabled before the RoboDuet stage switch; stage1 exposes zero arm command to the actor
+
+Frames:
+
+- dog velocity commands are compared against base-frame linear/angular velocity
+- arm `l/p/y` is expressed in a yaw-aligned base frame, with `z` measured relative to ground height
+- arm orientation command/observation uses the upstream `abg` parameterization of the end-effector quaternion in the same yaw-aligned base frame
+
+#### 4. Stage1 Arm Freeze and Network / Controller I/O
+
+Upstream behavior:
+
+- `keep_arm_fixed = True`
+- when `switch_open == False`, upstream directly resets arm DOF position to default and arm DOF velocity to zero every physics step
+
+Local IsaacLab port:
+
+- the runner resolves the same stage-switch iteration as upstream
+- before switch:
+  - the arm PPO is not stepped
+  - the environment executes zero arm actions
+  - the joint action term forces joints `joint1..joint6` to use zero delta action
+- because the Go2Arm action term is default-centered, zero arm delta means the arm controller target stays at the default arm posture
+
+Network I/O:
+
+- dog policy input:
+  - `projected_gravity(3) + leg_joint_pos(12) + leg_joint_vel(12) + leg_action(12) + dog_cmd(5) + arm_cmd_obs(6) + roll_pitch(2) + clock(4) = 56`
+- dog privileged input:
+  - `2`
+- dog output:
+  - `12` leg action dims
+- arm policy input:
+  - `arm_joint_pos(6) + arm_action(6) + arm_cmd_obs(6) + roll_pitch(2) = 20`
+- arm privileged input:
+  - `9`
+- arm output:
+  - `8 = 6 arm joint-action dims + 2 plan-action dims`
+
+Executed controller chain:
+
+1. arm network outputs `8` dims
+2. first `6` dims become arm joint delta actions
+3. last `2` dims become planner outputs and are mapped to commanded body `pitch/roll`
+4. the joint action term rescales all joint deltas by `0.25`
+5. hip joint deltas are additionally multiplied by `0.5`
+6. final joint-position target is `default_joint_pos + delta`
+7. the robot arm actuator is `DelayedPDActuatorCfg(joint1..joint6)`, so the low-level controller receives joint position targets rather than torque commands
+
+Play-mode note:
+
+- `scripts/reinforcement_learning/rsl_rl/play.py` explicitly sets `fixed_delta_action_until_iteration = 0`, so playback does not re-enable the stage1 arm freeze.
+
 ## Citation
 
 This repository is a modified version of `robot_lab`.

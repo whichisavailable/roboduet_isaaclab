@@ -9,6 +9,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.sensors import ContactSensor
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
+from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import GO2ARM_ARM_JOINT_NAMES
 
 
 class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
@@ -156,6 +157,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_reward_dog = torch.zeros(self.num_envs, device=self.device)
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
         self._validate_go2arm_precise_foot_bodies()
+        self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
 
     def set_plan_actions(self, plan_actions: torch.Tensor) -> None:
         """镜像 upstream `env.plan(...)`，先缓存，再把 pitch/roll 规划动作写回命令项。"""
@@ -259,6 +261,55 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             except Exception:  # noqa: BLE001
                 continue
         raise KeyError("No supported go2arm command term found. Expected 'roboduet' or 'ee_pose'.")
+
+    def _go2arm_fixed_arm_until_iteration(self) -> int | None:
+        action_term = None
+        if hasattr(self, "action_manager"):
+            try:
+                action_term = self.action_manager.get_term("joint_pos")
+            except KeyError:
+                action_term = None
+        fixed_until_iteration = getattr(getattr(action_term, "cfg", None), "fixed_delta_action_until_iteration", None)
+        if fixed_until_iteration is not None:
+            return int(fixed_until_iteration)
+        joint_pos_cfg = getattr(getattr(self.cfg, "actions", None), "joint_pos", None)
+        if joint_pos_cfg is None:
+            return None
+        fixed_until_iteration = getattr(joint_pos_cfg, "fixed_delta_action_until_iteration", None)
+        if fixed_until_iteration is None:
+            return None
+        return int(fixed_until_iteration)
+
+    def _go2arm_should_keep_arm_fixed(self) -> bool:
+        fixed_until_iteration = self._go2arm_fixed_arm_until_iteration()
+        if fixed_until_iteration is None or fixed_until_iteration <= 0:
+            return False
+
+        action_term = None
+        if hasattr(self, "action_manager"):
+            try:
+                action_term = self.action_manager.get_term("joint_pos")
+            except KeyError:
+                action_term = None
+        steps_per_iteration = int(
+            getattr(
+                getattr(action_term, "cfg", None),
+                "fixed_delta_action_steps_per_iteration",
+                getattr(getattr(self.cfg.actions, "joint_pos", None), "fixed_delta_action_steps_per_iteration", 24),
+            )
+        )
+        current_step = int(getattr(self, "common_step_counter", 0))
+        current_iteration = float(current_step) / float(max(steps_per_iteration, 1))
+        return current_iteration < float(fixed_until_iteration)
+
+    def _keep_go2arm_arm_fixed(self) -> None:
+        if len(self._go2arm_arm_joint_ids) == 0:
+            return
+        robot = self.scene["robot"]
+        arm_joint_ids = torch.as_tensor(self._go2arm_arm_joint_ids, dtype=torch.long, device=self.device)
+        arm_default_pos = robot.data.default_joint_pos[:, arm_joint_ids]
+        arm_zero_vel = torch.zeros_like(arm_default_pos)
+        robot.write_joint_state_to_sim(arm_default_pos, arm_zero_vel, joint_ids=arm_joint_ids)
 
     def _classify_episode_bucket(
         self, sampled_target_pos_b: torch.Tensor, target_pos_w: torch.Tensor, command_cfg
@@ -586,7 +637,52 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         if self._debug_zero_action:
             action = torch.zeros_like(action)
 
-        obs, rew, terminated, truncated, extras = super().step(action)
+        self.action_manager.process_action(action.to(self.device))
+        self.recorder_manager.record_pre_step()
+        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+
+        for _ in range(self.cfg.decimation):
+            self._sim_step_counter += 1
+            self.action_manager.apply_action()
+            if self._go2arm_should_keep_arm_fixed():
+                self._keep_go2arm_arm_fixed()
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.recorder_manager.record_post_physics_decimation_step()
+            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                self.sim.render()
+            self.scene.update(dt=self.physics_dt)
+
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+        self.reset_buf = self.termination_manager.compute()
+        self.reset_terminated = self.termination_manager.terminated
+        self.reset_time_outs = self.termination_manager.time_outs
+        self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
+
+        if len(self.recorder_manager.active_terms) > 0:
+            self.obs_buf = self.observation_manager.compute()
+            self.recorder_manager.record_post_step()
+
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self.recorder_manager.record_pre_reset(reset_env_ids)
+            self._reset_idx(reset_env_ids)
+            if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
+                for _ in range(self.cfg.num_rerenders_on_reset):
+                    self.sim.render()
+            self.recorder_manager.record_post_reset(reset_env_ids)
+
+        self.command_manager.compute(dt=self.step_dt)
+        if "interval" in self.event_manager.available_modes:
+            self.event_manager.apply(mode="interval", dt=self.step_dt)
+        self.obs_buf = self.observation_manager.compute(update_history=True)
+
+        obs = self.obs_buf
+        rew = self.reward_buf
+        terminated = self.reset_terminated
+        truncated = self.reset_time_outs
+        extras = self.extras
         self._go2arm_last_last_joint_pos_target.copy_(self._go2arm_last_joint_pos_target)
         self._go2arm_last_joint_pos_target.copy_(self._go2arm_joint_pos_target)
         self.last_plan_actions.copy_(self.plan_actions)

@@ -78,7 +78,7 @@ class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlBaseRunnerCfg):
     empirical_normalization: bool = False
     experiment_name: str = "roboduet_go2arm_rough"
     run_name: str = ""
-    clip_actions: float | None = None
+    clip_actions: float | None = 10.0
     obs_groups: dict[str, list[str]] = {
         "dog_policy": ["dog_policy"],
         "dog_privileged": ["dog_privileged"],

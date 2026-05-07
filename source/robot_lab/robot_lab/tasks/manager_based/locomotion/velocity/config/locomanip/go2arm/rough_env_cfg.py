@@ -20,7 +20,6 @@ from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg impo
     GO2ARM_FOOT_BODY_NAMES,
     GO2ARM_FOOT_SCANNER_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
-    GO2ARM_NON_FOOT_BODY_REGEX,
     Go2ArmDefaultDeltaJointPositionActionCfg,
     LocomotionVelocityRoughEnvCfg,
 )
@@ -206,7 +205,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             scale=1.0,
             clip=None,
             delta_clip=None,
-            action_scale=0.25,
+            action_scale=0.5,
             hip_joint_names=["^(FL|FR|RL|RR)_hip_joint$"],
             hip_scale_reduction=0.5,
             fixed_delta_action_joint_names=["^joint[1-6]$"],
@@ -312,15 +311,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         self.terminations.time_out = DoneTerm(func=mdp.time_out, time_out=True)
         self.terminations.terrain_out_of_bounds = None
-        self.terminations.non_foot_contact_termination = DoneTerm(
-            func=mdp.contact_termination,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
-                "soft_force_threshold": 1.0,
-                "hard_force_threshold": 5.0,
-                "consecutive_steps": 3,
-            },
-        )
+        self.terminations.non_foot_contact_termination = None
         self.terminations.base_orientation_termination = None
         self.terminations.base_height_termination = DoneTerm(
             func=mdp.roboduet_body_height_termination,
