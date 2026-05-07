@@ -6,10 +6,13 @@ from __future__ import annotations
 import copy
 import os
 import time
+import statistics
+from collections import deque
 from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+from rsl_rl.utils.logger import Logger
 
 from .automatic_models import ArmActorCritic, DogActorCritic
 from .automatic_ppo import AutomaticPPO
@@ -105,9 +108,10 @@ class RoboDuetAutomaticRunner:
         self.log_dir = log_dir
         self.device = device
         self.current_learning_iteration = 0
-        self.git_status_repos: list[str] = []
         self.export_deploy_models = bool(self.cfg.get("roboduet_export_deploy_models", True))
-        self.log_interval = max(1, int(self.cfg.get("log_interval", 1)))
+        self.gpu_world_size = 1
+        self.gpu_global_rank = 0
+        self.is_distributed = False
 
         obs = self.env.get_observations()
         self.dog_obs_dim = int(obs["dog_policy"].shape[-1])
@@ -118,6 +122,8 @@ class RoboDuetAutomaticRunner:
         dog_cfg = dict(self.cfg["dog_model"])
         arm_cfg = dict(self.cfg["arm_model"])
         algorithm_cfg = dict(self.cfg["algorithm"])
+        algorithm_cfg.setdefault("rnd_cfg", None)
+        self.cfg["algorithm"] = algorithm_cfg
 
         dog_model_class = resolve_callable(dog_cfg.pop("class_name"))
         arm_model_class = resolve_callable(arm_cfg.pop("class_name"))
@@ -175,6 +181,8 @@ class RoboDuetAutomaticRunner:
             self.env.num_envs, self.arm_obs_dim * self.arm_history_length, device=self.device
         )
         self.fake_arm_actions = torch.zeros(self.env.num_envs, self.arm_action_dim, device=self.device)
+        self.arm_rewbuffer = deque(maxlen=100)
+        self.cur_arm_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         self.inference_policy = RoboDuetAutomaticInferencePolicy(
             self.env,
@@ -188,20 +196,21 @@ class RoboDuetAutomaticRunner:
         )
         # keep a minimal compatibility surface for play/export code that inspects runner.alg.policy
         self.alg = SimpleNamespace(policy=self.inference_policy)
-
-        print(
-            "[INFO] RoboDuet runner initialized: "
-            f"num_envs={self.env.num_envs}, "
-            f"num_steps_per_env={int(self.cfg['num_steps_per_env'])}, "
-            f"save_interval={int(self.cfg['save_interval'])}, "
-            f"log_interval={self.log_interval}"
+        self.logger = Logger(
+            log_dir=log_dir,
+            cfg=self.cfg,
+            env_cfg=self.env.cfg,
+            num_envs=self.env.num_envs,
+            is_distributed=self.is_distributed,
+            gpu_world_size=self.gpu_world_size,
+            gpu_global_rank=self.gpu_global_rank,
+            device=self.device,
         )
-        reset_start_time = time.perf_counter()
+
         self.env.reset()
-        print(f"[INFO] RoboDuet runner env.reset() finished in {time.perf_counter() - reset_start_time:.2f}s.")
 
     def add_git_repo_to_log(self, repo_file_path: str) -> None:
-        self.git_status_repos.append(repo_file_path)
+        self.logger.git_status_repos.append(repo_file_path)
 
     def _resolve_stage_switch_iteration(self) -> int:
         if bool(self.cfg.get("roboduet_disable_two_stage", False)):
@@ -298,6 +307,34 @@ class RoboDuetAutomaticRunner:
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
         return rewards_dog, rewards_arm, dones.to(self.device), extras
 
+    @staticmethod
+    def _make_loss_dict(prefix: str, loss_tuple) -> dict[str, float]:
+        return {
+            f"{prefix}/value_function": float(loss_tuple[0]),
+            f"{prefix}/surrogate": float(loss_tuple[1]),
+            f"{prefix}/adaptation_module": float(loss_tuple[2]),
+            f"{prefix}/adaptation_module_test": float(loss_tuple[5]),
+        }
+
+    def _process_arm_reward_step(self, rewards_arm: torch.Tensor, dones: torch.Tensor) -> None:
+        self.cur_arm_reward_sum += rewards_arm
+        new_ids = (dones > 0).nonzero(as_tuple=False)
+        self.arm_rewbuffer.extend(self.cur_arm_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+        self.cur_arm_reward_sum[new_ids] = 0
+
+    def _log_roboduet_scalars(self, it: int) -> None:
+        if self.logger.writer is None:
+            return
+        self.logger.writer.add_scalar("RoboDuet/switch_open", float(self._command_term().switch_open), it)
+        self.logger.writer.add_scalar("Policy/dog_mean_std", self.dog_model.std.mean().item(), it)
+        self.logger.writer.add_scalar("Policy/arm_mean_std", self.arm_model.std.mean().item(), it)
+        if len(self.arm_rewbuffer) > 0:
+            self.logger.writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
+            if getattr(self.logger, "logger_type", "tensorboard") != "wandb":
+                self.logger.writer.add_scalar(
+                    "Train/mean_arm_reward/time", statistics.mean(self.arm_rewbuffer), int(self.logger.tot_time)
+                )
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
@@ -306,20 +343,15 @@ class RoboDuetAutomaticRunner:
 
         self.alg_dog.train_mode()
         self.alg_arm.train_mode()
+        self.logger.init_logging_writer()
 
         arm_obs_dict = self._get_arm_observations()
         num_steps_per_env = int(self.cfg["num_steps_per_env"])
 
+        start_it = self.current_learning_iteration
         total_it = self.current_learning_iteration + num_learning_iterations
-        print(
-            "[INFO] Starting RoboDuet training: "
-            f"start_iteration={self.current_learning_iteration}, "
-            f"total_iterations={total_it}, "
-            f"num_steps_per_env={num_steps_per_env}, "
-            f"switch_open={self._command_term().switch_open}"
-        )
         for it in range(self.current_learning_iteration, total_it):
-            iteration_start_time = time.perf_counter()
+            rollout_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):
                     if self._command_term().switch_open:
@@ -343,6 +375,8 @@ class RoboDuetAutomaticRunner:
                         dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
                     )
                     rewards_dog, rewards_arm, dones, extras = self._step_env(actions_dog, arm_actions)
+                    self.logger.process_env_step(rewards_dog, dones, extras)
+                    self._process_arm_reward_step(rewards_arm, dones)
 
                     if self._command_term().switch_open:
                         arm_obs_dict = self._get_arm_observations()
@@ -351,38 +385,47 @@ class RoboDuetAutomaticRunner:
                     done_env_ids = dones.nonzero(as_tuple=False).flatten()
                     self._clear_cached(done_env_ids)
 
-                rollout_duration = time.perf_counter() - iteration_start_time
+                collect_time = time.perf_counter() - rollout_start_time
                 if self._command_term().switch_open:
                     self.alg_arm.compute_returns(arm_obs_dict["obs_history"], arm_obs_dict["privileged_obs"])
                 self.alg_dog.compute_returns(dog_obs_dict["obs_history"], dog_obs_dict["privileged_obs"])
 
             update_start_time = time.perf_counter()
             if self._command_term().switch_open:
-                self.alg_arm.update(un_adapt=False)
-            self.alg_dog.update()
-            update_duration = time.perf_counter() - update_start_time
+                arm_loss_tuple = self.alg_arm.update(un_adapt=False)
+            else:
+                arm_loss_tuple = None
+            dog_loss_tuple = self.alg_dog.update()
+            learn_time = time.perf_counter() - update_start_time
             self.current_learning_iteration = it + 1
-            iteration_duration = time.perf_counter() - iteration_start_time
 
-            if (
-                self.current_learning_iteration == 1
-                or self.current_learning_iteration % self.log_interval == 0
-                or self.current_learning_iteration == total_it
-            ):
-                print(
-                    "[INFO] RoboDuet iteration "
-                    f"{self.current_learning_iteration}/{total_it}: "
-                    f"rollout={rollout_duration:.2f}s, "
-                    f"update={update_duration:.2f}s, "
-                    f"total={iteration_duration:.2f}s, "
-                    f"switch_open={self._command_term().switch_open}"
-                )
+            loss_dict = self._make_loss_dict("dog", dog_loss_tuple)
+            if arm_loss_tuple is not None:
+                loss_dict.update(self._make_loss_dict("arm", arm_loss_tuple))
+            action_std = (
+                torch.cat((self.dog_model.std.detach(), self.arm_model.std.detach()))
+                if self._command_term().switch_open
+                else self.dog_model.std.detach()
+            )
+            self.logger.log(
+                it=it,
+                start_it=start_it,
+                total_it=total_it,
+                collect_time=collect_time,
+                learn_time=learn_time,
+                loss_dict=loss_dict,
+                learning_rate=self.alg_dog.learning_rate,
+                action_std=action_std,
+                rnd_weight=None,
+            )
+            self._log_roboduet_scalars(it)
 
-            if self.log_dir is not None and self.current_learning_iteration % int(self.cfg["save_interval"]) == 0:
+            if self.log_dir is not None and it % int(self.cfg["save_interval"]) == 0:
                 self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+        self.logger.stop_logging_writer()
 
     def save(self, path: str, infos: dict | None = None) -> None:
         save_dict = {
@@ -393,6 +436,7 @@ class RoboDuetAutomaticRunner:
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(save_dict, path)
+        self.logger.save_model(path, self.current_learning_iteration)
 
         if self.log_dir is not None:
             dog_dir = os.path.join(self.log_dir, "checkpoints_dog")
