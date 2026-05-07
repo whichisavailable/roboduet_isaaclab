@@ -20,6 +20,7 @@ from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg impo
     GO2ARM_FOOT_BODY_NAMES,
     GO2ARM_FOOT_SCANNER_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
+    GO2ARM_NON_FOOT_BODY_REGEX,
     Go2ArmDefaultDeltaJointPositionActionCfg,
     LocomotionVelocityRoughEnvCfg,
 )
@@ -173,7 +174,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/" + GO2ARM_BASE_BODY_NAME
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + GO2ARM_BASE_BODY_NAME
-        self.scene.contact_forces.prim_path = "{ENV_REGEX_NS}/Robot/.*"
 
         self.scene.FL_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/FL_foot"
         self.scene.FR_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/FR_foot"
@@ -189,13 +189,13 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.RL_foot_contact.filter_prim_paths_expr = terrain_contact_filter
         self.scene.RR_foot_contact.filter_prim_paths_expr = terrain_contact_filter
 
-        self.observations.policy = RoboDuetDogPolicyObsCfg()
+        self.observations.policy = None
         self.observations.dog_policy = RoboDuetDogPolicyObsCfg()
         self.observations.dog_privileged = RoboDuetDogPrivilegedObsCfg()
         self.observations.arm_policy = RoboDuetArmPolicyObsCfg()
         self.observations.arm_privileged = RoboDuetArmPrivilegedObsCfg()
         self.observations.critic = None
-        self.observations.privileged = RoboDuetArmPrivilegedObsCfg()
+        self.observations.privileged = None
 
         self.actions.joint_pos = Go2ArmDefaultDeltaJointPositionActionCfg(
             asset_name="robot",
@@ -269,7 +269,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "manip_weight_rpy": 1.0,
             },
         )
-        self.rewards.is_terminated.weight = 0.0
 
         self.events.randomize_rigid_body_material = EventTerm(
             func=mdp.randomize_rigid_body_material,
@@ -292,9 +291,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "recompute_inertia": True,
             },
         )
-        self.events.randomize_rigid_body_mass_others = None
-        self.events.randomize_apply_external_force_torque = None
-        self.events.randomize_actuator_gains = None
+        self.events.randomize_rigid_body_mass_ee = None
+        self.events.randomize_apply_external_force_torque_base = None
+        self.events.randomize_apply_external_force_torque_ee = None
         self.events.randomize_push_robot = None
         self.events.randomize_reset_joints.params["position_range"] = (0.5, 1.5)
         self.events.randomize_reset_joints.params["velocity_range"] = (0.0, 0.0)
@@ -307,7 +306,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "pitch": (-0.5, 0.5),
             "yaw": (-0.5, 0.5),
         }
-        self.events.randomize_gravity = None
 
         self.terminations.time_out = DoneTerm(func=mdp.time_out, time_out=True)
         self.terminations.terrain_out_of_bounds = None
@@ -336,7 +334,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        self.curriculum.terrain_levels = None
+        self.curriculum.go2arm_reaching_stages = None
         self.curriculum.roboduet_stage_switch = CurrTerm(
             func=mdp.roboduet_stage_switch,
             params={"command_name": "roboduet"},

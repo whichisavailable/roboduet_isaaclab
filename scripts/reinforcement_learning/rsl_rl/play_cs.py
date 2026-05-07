@@ -139,10 +139,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.commands.base_velocity.ranges.lin_vel_x = (-2.0, 2.0)
     env_cfg.commands.base_velocity.ranges.lin_vel_y = (-2.0, 2.0)
     env_cfg.commands.base_velocity.ranges.ang_vel_z = (-1.5, 1.5)
-    env_cfg.curriculum.terrain_levels = None
+    if hasattr(env_cfg.curriculum, "terrain_levels"):
+        env_cfg.curriculum.terrain_levels = None
     env_cfg.curriculum.command_levels_lin_vel = None
     env_cfg.curriculum.command_levels_ang_vel = None
-    env_cfg.terminations.illegal_contact = None
+    if hasattr(env_cfg.terminations, "illegal_contact"):
+        env_cfg.terminations.illegal_contact = None
+    if hasattr(env_cfg.terminations, "non_foot_contact_termination"):
+        env_cfg.terminations.non_foot_contact_termination = None
     env_cfg.terminations.terrain_out_of_bounds = None
 
     # spawn the robot randomly in the grid (instead of their terrain levels)
@@ -156,8 +160,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # disable randomization for play
     env_cfg.observations.policy.enable_corruption = False
     # remove random pushing
-    env_cfg.events.randomize_apply_external_force_torque = None
-    env_cfg.events.push_robot = None
+    for event_name in (
+        "randomize_apply_external_force_torque",
+        "randomize_apply_external_force_torque_base",
+        "randomize_apply_external_force_torque_ee",
+    ):
+        if hasattr(env_cfg.events, event_name):
+            setattr(env_cfg.events, event_name, None)
+    if hasattr(env_cfg.events, "randomize_push_robot"):
+        env_cfg.events.randomize_push_robot = None
+    elif hasattr(env_cfg.events, "push_robot"):
+        env_cfg.events.push_robot = None
     env_cfg.curriculum.command_levels_lin_vel = None
     env_cfg.curriculum.command_levels_ang_vel = None
 

@@ -198,59 +198,63 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.scene.terrain.terrain_generator.num_cols = 5
         env_cfg.scene.terrain.terrain_generator.curriculum = False
 
-    # disable randomization for play
-    for obs_group_name in ("policy", "dog_policy", "arm_policy", "privileged", "dog_privileged", "arm_privileged"):
-        obs_group = getattr(env_cfg.observations, obs_group_name, None)
-        if obs_group is not None:
-            obs_group.enable_corruption = False
-    # remove random pushing
-    env_cfg.events.randomize_apply_external_force_torque = None
-    env_cfg.events.push_robot = None
-    env_cfg.curriculum.command_levels_lin_vel = None
-    env_cfg.curriculum.command_levels_ang_vel = None
     if "go2arm" in task_name.lower():
+        env_cfg.observations.dog_policy.enable_corruption = False
+        env_cfg.observations.dog_privileged.enable_corruption = False
+        env_cfg.observations.arm_policy.enable_corruption = False
+        env_cfg.observations.arm_privileged.enable_corruption = False
+        env_cfg.events.randomize_apply_external_force_torque_base = None
+        env_cfg.events.randomize_apply_external_force_torque_ee = None
+        env_cfg.events.randomize_push_robot = None
         env_cfg.enable_play_termination_reason_logging = True
-        if hasattr(env_cfg, "actions") and hasattr(env_cfg.actions, "joint_pos"):
-            # Play starts a fresh environment counter at 0, so the training-time fixed arm freeze
-            # would otherwise be active again for many steps. Disable it here to observe the
-            # policy's real arm output during play.
-            env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = 0
-            print("[INFO] Go2Arm play override: disabled fixed arm-action freeze for playback.")
+        # Play starts a fresh environment counter at 0, so the training-time fixed arm freeze
+        # would otherwise be active again for many steps. Disable it here to observe the
+        # policy's real arm output during play.
+        env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = 0
+        print("[INFO] Go2Arm play override: disabled fixed arm-action freeze for playback.")
+    else:
+        if env_cfg.observations.policy is not None:
+            env_cfg.observations.policy.enable_corruption = False
+        if getattr(env_cfg.observations, "privileged", None) is not None:
+            env_cfg.observations.privileged.enable_corruption = False
+        env_cfg.events.randomize_apply_external_force_torque = None
+        env_cfg.events.randomize_push_robot = None
+        env_cfg.curriculum.command_levels_lin_vel = None
+        env_cfg.curriculum.command_levels_ang_vel = None
     go2arm_fixed_target = args_cli.go2arm_ee_pos is not None or args_cli.go2arm_ee_rpy is not None
-    if go2arm_fixed_target and hasattr(env_cfg.curriculum, "go2arm_reaching_stages"):
+    if "go2arm" in task_name.lower() and go2arm_fixed_target:
         env_cfg.curriculum.go2arm_reaching_stages = None
-        if hasattr(env_cfg.commands, "ee_pose"):
-            if args_cli.go2arm_ee_pos is not None:
-                ee_x_b, ee_y_b, ee_z_w = args_cli.go2arm_ee_pos
-                env_cfg.commands.ee_pose.position_range_b = (ee_x_b, ee_x_b, ee_y_b, ee_y_b, 0.0, 0.0)
-                env_cfg.commands.ee_pose.world_z_range = (ee_z_w, ee_z_w)
-            else:
-                env_cfg.commands.ee_pose.position_range_b = (0.05, 2.00, -0.35, 0.35, 0.0, 0.0)
-                env_cfg.commands.ee_pose.world_z_range = (0.02, 1.20)
-            if args_cli.go2arm_ee_rpy is not None:
-                ee_roll_b, ee_pitch_b, ee_yaw_b = args_cli.go2arm_ee_rpy
-                env_cfg.commands.ee_pose.euler_xyz_range_b = (
-                    ee_roll_b,
-                    ee_roll_b,
-                    ee_pitch_b,
-                    ee_pitch_b,
-                    ee_yaw_b,
-                    ee_yaw_b,
-                )
-            print(
-                f"[INFO] Go2Arm fixed ee command override: pos={args_cli.go2arm_ee_pos}, rpy={args_cli.go2arm_ee_rpy}"
+        if args_cli.go2arm_ee_pos is not None:
+            ee_x_b, ee_y_b, ee_z_w = args_cli.go2arm_ee_pos
+            env_cfg.commands.ee_pose.position_range_b = (ee_x_b, ee_x_b, ee_y_b, ee_y_b, 0.0, 0.0)
+            env_cfg.commands.ee_pose.world_z_range = (ee_z_w, ee_z_w)
+        else:
+            env_cfg.commands.ee_pose.position_range_b = (0.05, 2.00, -0.35, 0.35, 0.0, 0.0)
+            env_cfg.commands.ee_pose.world_z_range = (0.02, 1.20)
+        if args_cli.go2arm_ee_rpy is not None:
+            ee_roll_b, ee_pitch_b, ee_yaw_b = args_cli.go2arm_ee_rpy
+            env_cfg.commands.ee_pose.euler_xyz_range_b = (
+                ee_roll_b,
+                ee_roll_b,
+                ee_pitch_b,
+                ee_pitch_b,
+                ee_yaw_b,
+                ee_yaw_b,
             )
-            env_cfg.commands.ee_pose.sample_z_in_world_frame = True
-            env_cfg.commands.ee_pose.reject_position_cuboid = None
-            env_cfg.commands.ee_pose.max_sampling_tries = 1
-            env_cfg.commands.ee_pose.secondary_position_range_b = None
-            env_cfg.commands.ee_pose.secondary_euler_xyz_range_b = None
-            env_cfg.commands.ee_pose.secondary_world_z_range = None
-            env_cfg.commands.ee_pose.secondary_sample_prob = 0.0
-            env_cfg.commands.ee_pose.tertiary_position_range_b = None
-            env_cfg.commands.ee_pose.tertiary_euler_xyz_range_b = None
-            env_cfg.commands.ee_pose.tertiary_world_z_range = None
-            env_cfg.commands.ee_pose.tertiary_sample_prob = 0.0
+        print(
+            f"[INFO] Go2Arm fixed ee command override: pos={args_cli.go2arm_ee_pos}, rpy={args_cli.go2arm_ee_rpy}"
+        )
+        env_cfg.commands.ee_pose.sample_z_in_world_frame = True
+        env_cfg.commands.ee_pose.reject_position_cuboid = None
+        env_cfg.commands.ee_pose.max_sampling_tries = 1
+        env_cfg.commands.ee_pose.secondary_position_range_b = None
+        env_cfg.commands.ee_pose.secondary_euler_xyz_range_b = None
+        env_cfg.commands.ee_pose.secondary_world_z_range = None
+        env_cfg.commands.ee_pose.secondary_sample_prob = 0.0
+        env_cfg.commands.ee_pose.tertiary_position_range_b = None
+        env_cfg.commands.ee_pose.tertiary_euler_xyz_range_b = None
+        env_cfg.commands.ee_pose.tertiary_world_z_range = None
+        env_cfg.commands.ee_pose.tertiary_sample_prob = 0.0
         env_cfg.events.randomize_reset_joints.params["position_range"] = (-0.04, 0.04)
         env_cfg.events.randomize_reset_joints.params["velocity_range"] = (-0.05, 0.05)
         env_cfg.events.randomize_reset_base.params["pose_range"] = {
@@ -258,6 +262,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "y": (-0.06, 0.06),
             "yaw": (-0.18, 0.18),
         }
+
+    if "go2arm" in task_name.lower() and args_cli.keyboard:
+        raise ValueError("Go2Arm/RoboDuet does not support generic `play.py --keyboard`; use the task-specific control path.")
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1
