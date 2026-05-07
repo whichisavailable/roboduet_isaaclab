@@ -12,7 +12,11 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
-from rsl_rl.utils.logger import Logger
+
+try:
+    from rsl_rl.utils.logger import Logger
+except ModuleNotFoundError:
+    from .logger_compat import Logger
 
 from .automatic_models import ArmActorCritic, DogActorCritic
 from .automatic_ppo import AutomaticPPO
