@@ -172,6 +172,10 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.merge_fixed_joints = False
         self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
+        # Upstream scripts/auto_train.py forces Cfg.terrain.mesh_type = "plane".
+        # Keep the rough task ID, but make its effective terrain semantics match auto_train.
+        self.scene.terrain.terrain_type = "plane"
+        self.scene.terrain.terrain_generator = None
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/" + GO2ARM_BASE_BODY_NAME
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + GO2ARM_BASE_BODY_NAME
 
@@ -205,7 +209,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             scale=1.0,
             clip=None,
             delta_clip=None,
-            action_scale=0.5,
+            action_scale=0.25,
             hip_joint_names=["^(FL|FR|RL|RR)_hip_joint$"],
             hip_scale_reduction=0.5,
             fixed_delta_action_joint_names=["^joint[1-6]$"],
@@ -307,6 +311,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.events.randomize_apply_external_force_torque_base = None
         self.events.randomize_apply_external_force_torque_ee = None
         self.events.randomize_push_robot = None
+        # Upstream auto_train samples reset DOF positions as default_joint_pos * U(0.5, 1.5).
+        # The shared go2arm base config uses offset reset, so switch the function here as well.
+        self.events.randomize_reset_joints.func = mdp.reset_joints_by_scale
         self.events.randomize_reset_joints.params["position_range"] = (0.5, 1.5)
         self.events.randomize_reset_joints.params["velocity_range"] = (0.0, 0.0)
         self.events.randomize_reset_base.params["pose_range"] = {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "yaw": (-math.pi, math.pi)}
@@ -328,7 +335,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={
                 "minimum_height": 0.28,
                 "asset_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
-                "sensor_cfg": SceneEntityCfg("height_scanner_base"),
+                "sensor_cfg": None,
             },
         )
         self.terminations.joint_position_termination = None
@@ -351,3 +358,10 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=mdp.roboduet_stage_switch,
             params={"command_name": "roboduet"},
         )
+
+        self.scene.height_scanner = None
+        self.scene.height_scanner_base = None
+        self.scene.FL_foot_scanner = None
+        self.scene.FR_foot_scanner = None
+        self.scene.RL_foot_scanner = None
+        self.scene.RR_foot_scanner = None
