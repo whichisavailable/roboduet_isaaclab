@@ -135,6 +135,13 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._enable_play_termination_reason_logging = bool(
             getattr(cfg, "enable_play_termination_reason_logging", False)
         )
+        self._enable_base_frame_validation_logging = bool(
+            getattr(cfg, "enable_base_frame_validation_logging", False)
+        )
+        self._base_frame_validation_log_steps = max(0, int(getattr(cfg, "base_frame_validation_log_steps", 0)))
+        self._base_frame_validation_done_logs_remaining = max(
+            0, int(getattr(cfg, "base_frame_validation_done_logs", 0))
+        )
         self._episode_log_key_prefixes = tuple(getattr(cfg, "episode_log_key_prefixes", ()) or ())
         reward_log_interval_iterations = getattr(cfg, "reward_log_interval_iterations", None)
         reward_log_steps_per_iteration = int(getattr(cfg, "reward_log_steps_per_iteration", 24))
@@ -159,6 +166,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
         self._validate_go2arm_precise_foot_bodies()
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
+        self._go2arm_base_body_id = self._find_go2arm_body_id("base")
+        self._go2arm_base_link_body_id = self._find_go2arm_body_id("base_link")
+        self._log_go2arm_base_frame_static()
 
     def set_plan_actions(self, plan_actions: torch.Tensor) -> None:
         """镜像 upstream `env.plan(...)`，先缓存，再把 pitch/roll 规划动作写回命令项。"""
@@ -195,6 +205,82 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._go2arm_foot_contact_sensors = tuple(
             self.scene.sensors[sensor_name] for sensor_name in mdp.GO2ARM_FOOT_SENSOR_NAMES
         )
+
+    def _find_go2arm_body_id(self, body_name: str) -> int | None:
+        try:
+            body_ids, _ = self.scene["robot"].find_bodies([body_name], preserve_order=True)
+        except Exception:  # noqa: BLE001
+            return None
+        if not body_ids:
+            return None
+        return int(body_ids[0])
+
+    def _log_go2arm_base_frame_static(self) -> None:
+        if not self._enable_base_frame_validation_logging:
+            return
+        robot = self.scene["robot"]
+        body_names = tuple(getattr(robot, "body_names", ()))
+        root_body = body_names[0] if body_names else "<unknown>"
+        init_z = getattr(getattr(self.cfg.scene.robot, "init_state", None), "pos", (None, None, None))[2]
+        print(
+            "[Go2ArmBaseFrame] static "
+            f"root_body={root_body!r} base_id={self._go2arm_base_body_id} "
+            f"base_link_id={self._go2arm_base_link_body_id} init_state_z={init_z} "
+            f"base_link_offset_from_base={getattr(mdp, 'GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B', None)} "
+            f"first_bodies={list(body_names[:8])}"
+        )
+
+    def _height_at_body(self, body_id: int | None, env_ids: torch.Tensor) -> torch.Tensor | None:
+        if body_id is None:
+            return None
+        return self.scene["robot"].data.body_pos_w[env_ids, body_id, 2]
+
+    def _format_height_sample(self, name: str, values: torch.Tensor | None) -> str:
+        if values is None:
+            return f"{name}=<missing>"
+        return f"{name}={[round(float(value), 4) for value in values.detach().cpu()]}"
+
+    def _log_go2arm_base_frame_heights(
+        self,
+        reason: str,
+        env_ids: torch.Tensor | None = None,
+        episode_dict: dict[str, float | torch.Tensor] | None = None,
+    ) -> None:
+        if not self._enable_base_frame_validation_logging:
+            return
+
+        robot = self.scene["robot"]
+        if env_ids is None:
+            env_ids = torch.arange(min(self.num_envs, 4), device=self.device, dtype=torch.long)
+        else:
+            env_ids = env_ids[: min(int(env_ids.numel()), 4)].to(device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        with torch.no_grad():
+            root_z = robot.data.root_pos_w[env_ids, 2]
+            base_z = self._height_at_body(self._go2arm_base_body_id, env_ids)
+            base_link_z = self._height_at_body(self._go2arm_base_link_body_id, env_ids)
+            roboduet_base_z = mdp.roboduet_base_pose_w(robot)[0][env_ids, 2]
+            base_height_done = None
+            if "base_height_termination" in self.termination_manager.active_terms:
+                base_height_done = self.termination_manager.get_term("base_height_termination")[env_ids]
+            print(
+                f"[Go2ArmBaseFrame] {reason} step={int(self.common_step_counter)} "
+                f"env_ids={env_ids.detach().cpu().tolist()} "
+                f"{self._format_height_sample('root_z', root_z)} "
+                f"{self._format_height_sample('base_z', base_z)} "
+                f"{self._format_height_sample('base_link_z', base_link_z)} "
+                f"{self._format_height_sample('roboduet_base_z', roboduet_base_z)} "
+                f"base_height_done={None if base_height_done is None else base_height_done.detach().cpu().tolist()}"
+            )
+            if episode_dict is not None:
+                episode_dict["BaseFrame/root_z"] = root_z.mean()
+                if base_z is not None:
+                    episode_dict["BaseFrame/base_z"] = base_z.mean()
+                if base_link_z is not None:
+                    episode_dict["BaseFrame/base_link_z"] = base_link_z.mean()
+                episode_dict["BaseFrame/roboduet_base_z"] = roboduet_base_z.mean()
 
     def _reward_log_key(self, term_name: str) -> str:
         if term_name in self._GO2ARM_TRACKING_TERMS:
@@ -702,6 +788,11 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             self.recorder_manager.record_post_step()
 
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if int(self.common_step_counter) <= self._base_frame_validation_log_steps:
+            self._log_go2arm_base_frame_heights("early_step")
+        if len(reset_env_ids) > 0 and self._base_frame_validation_done_logs_remaining > 0:
+            self._log_go2arm_base_frame_heights("pre_reset_done", reset_env_ids)
+            self._base_frame_validation_done_logs_remaining -= 1
         if len(reset_env_ids) > 0:
             self.recorder_manager.record_pre_reset(reset_env_ids)
             self._reset_idx(reset_env_ids)
