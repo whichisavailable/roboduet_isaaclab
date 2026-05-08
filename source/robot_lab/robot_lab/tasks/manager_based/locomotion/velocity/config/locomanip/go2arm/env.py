@@ -167,7 +167,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._validate_go2arm_precise_foot_bodies()
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
         self._go2arm_base_body_id = self._find_go2arm_body_id("base")
-        self._go2arm_base_link_body_id = self._find_go2arm_body_id("base_link")
         self._log_go2arm_base_frame_static()
 
     def set_plan_actions(self, plan_actions: torch.Tensor) -> None:
@@ -224,9 +223,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         init_z = getattr(getattr(self.cfg.scene.robot, "init_state", None), "pos", (None, None, None))[2]
         print(
             "[Go2ArmBaseFrame] static "
-            f"root_body={root_body!r} base_id={self._go2arm_base_body_id} "
-            f"base_link_id={self._go2arm_base_link_body_id} init_state_z={init_z} "
-            f"base_link_offset_from_base={getattr(mdp, 'GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B', None)} "
+            f"root_body={root_body!r} base_id={self._go2arm_base_body_id} init_state_z={init_z} "
             f"first_bodies={list(body_names[:8])}"
         )
 
@@ -260,7 +257,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         with torch.no_grad():
             root_z = robot.data.root_pos_w[env_ids, 2]
             base_z = self._height_at_body(self._go2arm_base_body_id, env_ids)
-            base_link_z = self._height_at_body(self._go2arm_base_link_body_id, env_ids)
             roboduet_base_z = mdp.roboduet_base_pose_w(robot)[0][env_ids, 2]
             base_height_done = None
             if "base_height_termination" in self.termination_manager.active_terms:
@@ -270,7 +266,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
                 f"env_ids={env_ids.detach().cpu().tolist()} "
                 f"{self._format_height_sample('root_z', root_z)} "
                 f"{self._format_height_sample('base_z', base_z)} "
-                f"{self._format_height_sample('base_link_z', base_link_z)} "
                 f"{self._format_height_sample('roboduet_base_z', roboduet_base_z)} "
                 f"base_height_done={None if base_height_done is None else base_height_done.detach().cpu().tolist()}"
             )
@@ -278,8 +273,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
                 episode_dict["BaseFrame/root_z"] = root_z.mean()
                 if base_z is not None:
                     episode_dict["BaseFrame/base_z"] = base_z.mean()
-                if base_link_z is not None:
-                    episode_dict["BaseFrame/base_link_z"] = base_link_z.mean()
                 episode_dict["BaseFrame/roboduet_base_z"] = roboduet_base_z.mean()
 
     def _reward_log_key(self, term_name: str) -> str:

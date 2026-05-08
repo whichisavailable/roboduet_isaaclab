@@ -52,14 +52,7 @@ GO2ARM_LEG_JOINT_NAMES = (
 GO2ARM_ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 GO2ARM_ALL_JOINT_NAMES = GO2ARM_LEG_JOINT_NAMES + GO2ARM_ARM_JOINT_NAMES
 GO2ARM_BASE_BODY_NAME = "base"
-GO2ARM_ARM_BASE_BODY_NAME = "base_link"
 GO2ARM_EE_BODY_NAME = "link6"
-# Local go2arm keeps the arm mount fixed bodies unmerged.  Upstream RoboDuet
-# policy/reward code uses the actor root ("base") as the dog base frame.  If
-# IsaacLab exposes base_link as the articulation root, convert it back to the
-# equivalent upstream base frame with the fixed URDF transform:
-# base -> arm_mount: (0.10, 0, 0.072), arm_mount -> base_link: (0, 0, 0.015).
-GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B = (0.10, 0.0, 0.087)
 GO2ARM_COMMAND_CURRICULUM_KEYS = (
     "tracking_lin_vel",
     "tracking_ang_vel",
@@ -126,38 +119,16 @@ def _quat_to_abg(quat_wxyz: torch.Tensor) -> torch.Tensor:
     return torch.stack((alpha, beta, gamma), dim=-1)
 
 
-def _root_is_go2arm_base_link(asset: Articulation) -> bool:
-    body_names = tuple(getattr(asset, "body_names", ()))
-    return bool(body_names) and body_names[0] == GO2ARM_ARM_BASE_BODY_NAME
-
-
-def _go2arm_base_link_offset_from_base(asset: Articulation) -> torch.Tensor:
-    return torch.tensor(
-        GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B,
-        device=asset.device,
-        dtype=asset.data.root_pos_w.dtype,
-    ).expand(asset.num_instances, 3)
-
-
 def roboduet_base_pose_w(asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the upstream RoboDuet base pose, even when local root is base_link."""
+    """Return the upstream RoboDuet base pose: the actor root/body named ``base``."""
 
-    base_quat_w = asset.data.root_quat_w
-    if not _root_is_go2arm_base_link(asset):
-        return asset.data.root_pos_w, base_quat_w
-    base_link_offset_w = quat_apply(base_quat_w, _go2arm_base_link_offset_from_base(asset))
-    return asset.data.root_pos_w - base_link_offset_w, base_quat_w
+    return asset.data.root_pos_w, asset.data.root_quat_w
 
 
 def roboduet_base_velocity_b(asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
     """Return linear/angular velocity of the upstream RoboDuet base frame."""
 
-    if not _root_is_go2arm_base_link(asset):
-        return asset.data.root_lin_vel_b, asset.data.root_ang_vel_b
-    offset_b = _go2arm_base_link_offset_from_base(asset)
-    offset_w = quat_apply(asset.data.root_quat_w, offset_b)
-    base_lin_vel_w = asset.data.root_lin_vel_w - torch.cross(asset.data.root_ang_vel_w, offset_w, dim=-1)
-    return quat_apply_inverse(asset.data.root_quat_w, base_lin_vel_w), asset.data.root_ang_vel_b
+    return asset.data.root_lin_vel_b, asset.data.root_ang_vel_b
 
 
 def roboduet_projected_gravity_b(asset: Articulation) -> torch.Tensor:

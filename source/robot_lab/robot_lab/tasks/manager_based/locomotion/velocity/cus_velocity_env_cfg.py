@@ -81,8 +81,16 @@ GO2ARM_BASE_BODY_NAME = "base"
 GO2ARM_FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 GO2ARM_FOOT_NAMES = list(GO2ARM_FOOT_BODY_NAMES)
 GO2ARM_CONTACT_SENSOR_PRIM_PATH = (
-    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_calf(?:_link)?|base|base_link|link[1-6])$"
+    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_calf(?:_link)?|base|link[1-6])$"
 )
+# Upstream RoboDuet can monitor whole-body illegal contacts.  This port keeps a cheaper subset:
+# dog trunk base, lower legs, and arm links.  Do not use base_link here; it is the arm mount,
+# not the upstream dog base.
+GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES = [
+    GO2ARM_BASE_BODY_NAME,
+    r"^(FL|FR|RL|RR)_calf(?:_link)?$",
+    r"^link[1-6]$",
+]
 # Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]
 # 预设 trot 步态偏置。
@@ -632,7 +640,7 @@ class EventCfg:
     randomize_rigid_body_material = None
     randomize_rigid_body_mass_base = None
     randomize_rigid_body_mass_ee = None
-    # 基座外力域随机化：在 reset 时对 base_link 采样常值外力/外力矩，并在整个 episode 内持续生效。
+    # 基座外力域随机化：在 reset 时对上游语义的 base 采样常值外力/外力矩，并在整个 episode 内持续生效。
     randomize_apply_external_force_torque_base = EventTerm(
         func=mdp.apply_external_force_torque,
         mode="reset",
