@@ -390,7 +390,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.load(resume_path)
         _sync_resume_iteration_to_env(runner, env, agent_cfg)
 
-    _install_go2arm_mani_phase_reset_hook(runner, agent_cfg)
+    if agent_cfg.class_name != (
+        "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner:"
+        "RoboDuetAutomaticRunner"
+    ):
+        _install_go2arm_mani_phase_reset_hook(runner, agent_cfg)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
