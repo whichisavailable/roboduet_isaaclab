@@ -3041,12 +3041,15 @@ def _compute_roboduet_reward_state(
     scales = hybrid_scales if term.switch_open else pretrained_scales
     reward_names = tuple(hybrid_scales.keys())
     robot: Articulation = env.scene["robot"]
+    reward_dt = float(env.step_dt)
     reward_dog_linear = torch.zeros(env.num_envs, device=env.device)
     reward_arm_linear = torch.zeros(env.num_envs, device=env.device)
-    reward_pos_dog = torch.zeros(env.num_envs, device=env.device)
-    reward_neg_dog = torch.zeros(env.num_envs, device=env.device)
-    reward_pos_arm = torch.zeros(env.num_envs, device=env.device)
-    reward_neg_arm = torch.zeros(env.num_envs, device=env.device)
+    reward_dog_linear_scaled = torch.zeros(env.num_envs, device=env.device)
+    reward_arm_linear_scaled = torch.zeros(env.num_envs, device=env.device)
+    reward_pos_dog_scaled = torch.zeros(env.num_envs, device=env.device)
+    reward_neg_dog_scaled = torch.zeros(env.num_envs, device=env.device)
+    reward_pos_arm_scaled = torch.zeros(env.num_envs, device=env.device)
+    reward_neg_arm_scaled = torch.zeros(env.num_envs, device=env.device)
     foot_forces = get_go2arm_precise_foot_normal_forces(env, foot_sensor_cfg)
     if foot_forces is None:
         raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
@@ -3086,15 +3089,23 @@ def _compute_roboduet_reward_state(
         ),
         dim=1,
     )
+    foot_contacts = foot_forces > 1.0
+    last_foot_contacts = getattr(env, "_roboduet_last_foot_contacts", torch.zeros_like(foot_contacts))
+    contact_filter = torch.logical_or(foot_contacts, last_foot_contacts)
+    env._roboduet_last_foot_contacts = foot_contacts.detach().clone()
     metrics["feet_slip"] = torch.sum(
-        (foot_forces > 1.0).float() * torch.sum(torch.square(foot_velocities[:, :, :2]), dim=2),
+        contact_filter.float() * torch.sum(torch.square(foot_velocities[:, :, :2]), dim=2),
         dim=1,
     )
     phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
     ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SCANNER_NAMES)
-    contact_point_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2] - 0.022
-    ground_height = torch.where(ground_height_data["is_valid"], ground_height_data["ground_height_w"], contact_point_height)
-    foot_height = contact_point_height - ground_height
+    foot_center_height = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_sphere_centers_w"][..., 2]
+    ground_height = torch.where(
+        ground_height_data["is_valid"],
+        ground_height_data["ground_height_w"],
+        torch.zeros_like(foot_center_height),
+    )
+    foot_height = foot_center_height - ground_height
     target_height = 0.04 * phases + 0.02
     metrics["feet_clearance_cmd_linear"] = torch.sum(
         torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
@@ -3228,51 +3239,63 @@ def _compute_roboduet_reward_state(
         weighted_value = torch.zeros(env.num_envs, device=env.device)
         if metric_value is not None and scale != 0.0:
             weighted_value = metric_value * scale
+        weighted_value_scaled = weighted_value * reward_dt
         weighted_terms[name] = weighted_value
         reward_dog_linear += weighted_value
-        term_sum = torch.sum(weighted_value)
+        reward_dog_linear_scaled += weighted_value_scaled
+        term_sum = torch.sum(weighted_value_scaled)
         is_nonnegative = term_sum >= 0.0
         pos_mask = is_nonnegative.to(dtype=weighted_value.dtype)
         neg_mask = ((term_sum <= 0.0) & ~is_nonnegative).to(dtype=weighted_value.dtype)
-        reward_pos_dog += weighted_value * pos_mask
-        reward_neg_dog += weighted_value * neg_mask
+        reward_pos_dog_scaled += weighted_value_scaled * pos_mask
+        reward_neg_dog_scaled += weighted_value_scaled * neg_mask
         if name not in _ROBODUET_DOG_ONLY_TERMS:
             reward_arm_linear += weighted_value
-            reward_pos_arm += weighted_value * pos_mask
-            reward_neg_arm += weighted_value * neg_mask
+            reward_arm_linear_scaled += weighted_value_scaled
+            reward_pos_arm_scaled += weighted_value_scaled * pos_mask
+            reward_neg_arm_scaled += weighted_value_scaled * neg_mask
         if name in scales:
-            command_value = float(scales[name]) + weighted_value if name in _ROBODUET_CONTACT_OFFSET_TERMS else weighted_value
+            command_value = (
+                float(scales[name]) * reward_dt + weighted_value_scaled
+                if name in _ROBODUET_CONTACT_OFFSET_TERMS
+                else weighted_value_scaled
+            )
             command_sums[name] += command_value
             if name in GO2ARM_COMMAND_CURRICULUM_KEYS:
                 term.accumulate_metric(name, command_value)
-        log_episode_sums[name] += weighted_value
+        log_episode_sums[name] += weighted_value_scaled
 
     if only_positive_rewards:
-        reward_dog = torch.clamp(reward_dog_linear, min=0.0)
-        reward_arm = torch.clamp(reward_arm_linear, min=0.0)
+        reward_dog_scaled = torch.clamp(reward_dog_linear_scaled, min=0.0)
+        reward_arm_scaled = torch.clamp(reward_arm_linear_scaled, min=0.0)
     elif only_positive_rewards_ji22_style:
-        reward_dog = reward_pos_dog * torch.exp(reward_neg_dog / float(sigma_rew_neg))
-        reward_arm = reward_pos_arm * torch.exp(reward_neg_arm / float(sigma_rew_neg))
+        reward_dog_scaled = reward_pos_dog_scaled * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))
+        reward_arm_scaled = reward_pos_arm_scaled * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
     else:
-        reward_dog = reward_dog_linear
-        reward_arm = reward_arm_linear
-    log_episode_sums["total"] += reward_dog
+        reward_dog_scaled = reward_dog_linear_scaled
+        reward_arm_scaled = reward_arm_linear_scaled
+    reward_dog_for_manager = reward_dog_scaled / reward_dt
+    reward_arm_for_manager = reward_arm_scaled / reward_dt
+    log_episode_sums["total"] += reward_dog_scaled
 
     command_sums["lin_vel_raw"] += root_lin_vel_b[:, 0]
     command_sums["ang_vel_raw"] += root_ang_vel_b[:, 2]
     command_sums["lin_vel_residual"] += torch.square(root_lin_vel_b[:, 0] - term.commands_dog[:, 0])
     command_sums["ang_vel_residual"] += torch.square(root_ang_vel_b[:, 2] - term.commands_dog[:, 2])
     command_sums["ep_timesteps"] += 1.0
-    env._roboduet_reward_dog = reward_dog.detach().clone()
-    env._roboduet_reward_arm = reward_arm.detach().clone()
+    env._roboduet_reward_dog = reward_dog_scaled.detach().clone()
+    env._roboduet_reward_arm = reward_arm_scaled.detach().clone()
     env._roboduet_prev_joint_vel = robot.data.joint_vel.detach().clone()
 
     reward_state = {
         "weighted_terms": weighted_terms,
         "reward_dog_linear": reward_dog_linear,
-        "reward_dog": reward_dog,
-        "reward_arm": reward_arm,
-        "total_adjustment": reward_dog - reward_dog_linear,
+        "reward_dog_linear_scaled": reward_dog_linear_scaled,
+        "reward_dog": reward_dog_for_manager,
+        "reward_arm": reward_arm_for_manager,
+        "reward_dog_scaled": reward_dog_scaled,
+        "reward_arm_scaled": reward_arm_scaled,
+        "total_adjustment": reward_dog_for_manager - reward_dog_linear,
     }
     env._roboduet_reward_step_cache = {"key": cache_key, "value": reward_state}
     return reward_state

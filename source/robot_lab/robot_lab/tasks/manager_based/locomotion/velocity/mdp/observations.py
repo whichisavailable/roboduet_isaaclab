@@ -751,7 +751,7 @@ def observation_delay(
 
 def roboduet_joint_vel_loco(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.joint_vel[:, asset_cfg.joint_ids]
+    return asset.data.joint_vel[:, asset_cfg.joint_ids] * 0.05
 
 
 def roboduet_current_action(env: ManagerBasedEnv) -> torch.Tensor:
@@ -871,11 +871,11 @@ def _material_property(
 
 
 def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _material_property(env, asset_cfg, material_index=0)
+    return (_material_property(env, asset_cfg, material_index=0) - 0.5) * 2.0
 
 
 def roboduet_privileged_restitution(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    return _material_property(env, asset_cfg, material_index=2)
+    return (_material_property(env, asset_cfg, material_index=2) - 0.5) * 2.0
 
 
 def _ground_height_under_base(env: ManagerBasedEnv) -> torch.Tensor:
