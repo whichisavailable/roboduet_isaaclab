@@ -32,9 +32,11 @@ from .observations import (
     get_go2arm_precise_foot_contact_forces,
     get_go2arm_precise_foot_contact_timers,
     get_go2arm_precise_foot_normal_forces,
+    roboduet_base_velocity_b,
     roboduet_current_action,
     roboduet_current_ee_quat_in_base,
     roboduet_current_lpy,
+    roboduet_projected_gravity_b,
 )
 
 _ROBODUET_COMMAND_LOG_EXTRA_KEYS = (
@@ -3049,8 +3051,7 @@ def _compute_roboduet_reward_state(
     if foot_forces is None:
         raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
     foot_velocities = _get_go2arm_foot_kinematics(env, foot_asset_cfg)["foot_center_lin_vel_w"]
-    root_lin_vel_b = robot.data.root_lin_vel_b
-    root_ang_vel_b = robot.data.root_ang_vel_b
+    root_lin_vel_b, root_ang_vel_b = roboduet_base_velocity_b(robot)
     desired_contact = term.desired_contact_states
 
     metrics: dict[str, torch.Tensor] = {}
@@ -3071,12 +3072,12 @@ def _compute_roboduet_reward_state(
     desired_base_quat = quat_mul(quat_roll, quat_pitch)
     desired_projected_gravity = quat_apply_inverse(
         desired_base_quat,
-        torch.tensor([0.0, 0.0, -1.0], device=env.device, dtype=robot.data.projected_gravity_b.dtype).expand(
+        torch.tensor([0.0, 0.0, -1.0], device=env.device, dtype=roboduet_projected_gravity_b(robot).dtype).expand(
             env.num_envs, 3
         ),
     )
     metrics["orientation_control"] = torch.sum(
-        torch.square(robot.data.projected_gravity_b[:, :2] - desired_projected_gravity[:, :2]),
+        torch.square(roboduet_projected_gravity_b(robot)[:, :2] - desired_projected_gravity[:, :2]),
         dim=1,
     )
     metrics["loco_energy"] = torch.sum(

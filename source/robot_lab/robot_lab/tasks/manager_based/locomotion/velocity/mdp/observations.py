@@ -53,6 +53,12 @@ GO2ARM_ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joi
 GO2ARM_ALL_JOINT_NAMES = GO2ARM_LEG_JOINT_NAMES + GO2ARM_ARM_JOINT_NAMES
 GO2ARM_BASE_BODY_NAME = "base_link"
 GO2ARM_EE_BODY_NAME = "link6"
+# Local go2arm keeps the arm mount fixed bodies unmerged.  Upstream RoboDuet
+# policy/reward code uses the actor root ("base") as the dog base frame.  If
+# IsaacLab exposes base_link as the articulation root, convert it back to the
+# equivalent upstream base frame with the fixed URDF transform:
+# base -> arm_mount: (0.10, 0, 0.072), arm_mount -> base_link: (0, 0, 0.015).
+GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B = (0.10, 0.0, 0.087)
 GO2ARM_COMMAND_CURRICULUM_KEYS = (
     "tracking_lin_vel",
     "tracking_ang_vel",
@@ -117,6 +123,46 @@ def _quat_to_abg(quat_wxyz: torch.Tensor) -> torch.Tensor:
     beta = torch.atan2(pitch_vec[:, 0], pitch_vec[:, 2])
     gamma = torch.atan2(yaw_vec[:, 1], yaw_vec[:, 0])
     return torch.stack((alpha, beta, gamma), dim=-1)
+
+
+def _root_is_go2arm_base_link(asset: Articulation) -> bool:
+    body_names = tuple(getattr(asset, "body_names", ()))
+    return bool(body_names) and body_names[0] == GO2ARM_BASE_BODY_NAME
+
+
+def _go2arm_base_link_offset_from_base(asset: Articulation) -> torch.Tensor:
+    return torch.tensor(
+        GO2ARM_BASE_LINK_OFFSET_FROM_BASE_B,
+        device=asset.device,
+        dtype=asset.data.root_pos_w.dtype,
+    ).expand(asset.num_instances, 3)
+
+
+def roboduet_base_pose_w(asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the upstream RoboDuet base pose, even when local root is base_link."""
+
+    base_quat_w = asset.data.root_quat_w
+    if not _root_is_go2arm_base_link(asset):
+        return asset.data.root_pos_w, base_quat_w
+    base_link_offset_w = quat_apply(base_quat_w, _go2arm_base_link_offset_from_base(asset))
+    return asset.data.root_pos_w - base_link_offset_w, base_quat_w
+
+
+def roboduet_base_velocity_b(asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return linear/angular velocity of the upstream RoboDuet base frame."""
+
+    if not _root_is_go2arm_base_link(asset):
+        return asset.data.root_lin_vel_b, asset.data.root_ang_vel_b
+    offset_b = _go2arm_base_link_offset_from_base(asset)
+    offset_w = quat_apply(asset.data.root_quat_w, offset_b)
+    base_lin_vel_w = asset.data.root_lin_vel_w - torch.cross(asset.data.root_ang_vel_w, offset_w, dim=-1)
+    return quat_apply_inverse(asset.data.root_quat_w, base_lin_vel_w), asset.data.root_ang_vel_b
+
+
+def roboduet_projected_gravity_b(asset: Articulation) -> torch.Tensor:
+    """Return gravity projected into the upstream RoboDuet base frame."""
+
+    return asset.data.projected_gravity_b
 
 
 def get_go2arm_foot_sphere_centers_from_bodies(asset: Articulation, body_ids: list[int] | torch.Tensor) -> torch.Tensor:
@@ -778,7 +824,8 @@ def roboduet_commands_arm_obs(env: ManagerBasedEnv, command_name: str) -> torch.
 
 def roboduet_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    roll, pitch = _quat_to_roll_pitch(asset.data.root_quat_w)
+    _, base_quat_w = roboduet_base_pose_w(asset)
+    roll, pitch = _quat_to_roll_pitch(base_quat_w)
     return torch.stack((roll, pitch), dim=-1)
 
 
@@ -873,12 +920,12 @@ def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> tor
     asset: Articulation = env.scene[asset_cfg.name]
     ee_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
     ee_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
-    root_pos_w = asset.data.root_pos_w
-    yaw_quat = _body_yaw_quat(asset.data.root_quat_w)
+    base_pos_w, base_quat_w = roboduet_base_pose_w(asset)
+    yaw_quat = _body_yaw_quat(base_quat_w)
     grasper_offset_b = torch.tensor([0.1, 0.0, 0.0], device=env.device, dtype=ee_pos_w.dtype).expand(env.num_envs, 3)
     grasper_offset_w = quat_apply(ee_quat_w, grasper_offset_b)
     grasper_world = ee_pos_w + grasper_offset_w
-    delta_world = grasper_world - root_pos_w
+    delta_world = grasper_world - base_pos_w
     delta_yaw = quat_apply_inverse(yaw_quat, delta_world)
     delta_yaw[:, 2] = grasper_world[:, 2] - _ground_height_under_base(env) - 0.38
     l = torch.linalg.norm(delta_yaw, dim=1)
@@ -889,5 +936,6 @@ def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> tor
 
 def roboduet_current_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    yaw_quat = _body_yaw_quat(asset.data.root_quat_w)
+    _, base_quat_w = roboduet_base_pose_w(asset)
+    yaw_quat = _body_yaw_quat(base_quat_w)
     return quat_mul(quat_conjugate(yaw_quat), asset.data.body_quat_w[:, asset_cfg.body_ids[0]])

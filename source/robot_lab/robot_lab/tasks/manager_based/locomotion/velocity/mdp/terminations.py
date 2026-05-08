@@ -11,7 +11,7 @@ from isaaclab.sensors import ContactSensor, RayCaster
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
-from .observations import _get_command_term, _ground_height_under_base, _quat_to_roll_pitch
+from .observations import _get_command_term, _ground_height_under_base, _quat_to_roll_pitch, roboduet_base_pose_w
 
 
 def _persistent_violation(
@@ -275,7 +275,8 @@ def roboduet_body_height_termination(
     sensor_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
     asset: RigidObject = env.scene[asset_cfg.name]
-    height = asset.data.root_pos_w[:, 2]
+    base_pos_w, _ = roboduet_base_pose_w(asset)
+    height = base_pos_w[:, 2]
     if sensor_cfg is not None and sensor_cfg.name in env.scene.sensors:
         height = height - _ground_height_under_base(env)
     return height < minimum_height
@@ -293,10 +294,11 @@ def roboduet_reverse_termination(
     if not term.switch_open:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     asset: RigidObject = env.scene[asset_cfg.name]
-    roll, pitch = _quat_to_roll_pitch(asset.data.root_quat_w)
+    base_pos_w, base_quat_w = roboduet_base_pose_w(asset)
+    roll, pitch = _quat_to_roll_pitch(base_quat_w)
     reverse = torch.logical_and(roll > roll_limit, term.commands_arm[:, 2] > 0.0)
     reverse |= torch.logical_and(roll < -roll_limit, term.commands_arm[:, 2] < 0.0)
-    delta_z = term.commands_arm[:, 0] * torch.sin(term.commands_arm[:, 1]) + 0.38 - asset.data.root_pos_w[:, 2]
+    delta_z = term.commands_arm[:, 0] * torch.sin(term.commands_arm[:, 1]) + 0.38 - base_pos_w[:, 2]
     reverse |= torch.logical_and(pitch < -pitch_limit, delta_z < -headupdown_thres)
     reverse |= torch.logical_and(pitch > pitch_limit, delta_z > headupdown_thres)
     time_exceed = term.arm_time / torch.clamp(term.T_trajs, min=1.0e-6) > 0.6

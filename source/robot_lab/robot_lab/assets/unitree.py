@@ -40,7 +40,9 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.4),  # root position
+        # Upstream auto_train initializes the RoboDuet base frame at z=0.34.
+        # Local unmerged go2arm may expose base_link as root, which is 0.087 m above base.
+        pos=(0.0, 0.0, 0.427),  # root position
         joint_pos={
             ".*L_hip_joint": 0.1,
             ".*R_hip_joint": -0.1,
