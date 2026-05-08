@@ -288,6 +288,8 @@ def roboduet_reverse_termination(
     roll_limit: float,
     pitch_limit: float,
     headupdown_thres: float,
+    use_roll: bool = True,
+    use_pitch: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     term = _get_command_term(env, command_name)
@@ -296,10 +298,13 @@ def roboduet_reverse_termination(
     asset: RigidObject = env.scene[asset_cfg.name]
     base_pos_w, base_quat_w = roboduet_base_pose_w(asset)
     roll, pitch = _quat_to_roll_pitch(base_quat_w)
-    reverse = torch.logical_and(roll > roll_limit, term.commands_arm[:, 2] > 0.0)
-    reverse |= torch.logical_and(roll < -roll_limit, term.commands_arm[:, 2] < 0.0)
+    reverse = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if use_roll:
+        reverse |= torch.logical_and(roll > roll_limit, term.commands_arm[:, 2] > 0.0)
+        reverse |= torch.logical_and(roll < -roll_limit, term.commands_arm[:, 2] < 0.0)
     delta_z = term.commands_arm[:, 0] * torch.sin(term.commands_arm[:, 1]) + 0.38 - base_pos_w[:, 2]
-    reverse |= torch.logical_and(pitch < -pitch_limit, delta_z < -headupdown_thres)
-    reverse |= torch.logical_and(pitch > pitch_limit, delta_z > headupdown_thres)
+    if use_pitch:
+        reverse |= torch.logical_and(pitch < -pitch_limit, delta_z < -headupdown_thres)
+        reverse |= torch.logical_and(pitch > pitch_limit, delta_z > headupdown_thres)
     time_exceed = term.arm_time / torch.clamp(term.T_trajs, min=1.0e-6) > 0.6
     return reverse & time_exceed

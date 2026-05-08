@@ -28,10 +28,12 @@ from .observations import (
     _get_go2arm_foot_kinematics,
     _get_go2arm_ground_height_data,
     _quat_to_abg,
+    _quat_to_roll_pitch,
     _go2arm_phase_offsets,
     get_go2arm_precise_foot_contact_forces,
     get_go2arm_precise_foot_contact_timers,
     get_go2arm_precise_foot_normal_forces,
+    roboduet_base_pose_w,
     roboduet_base_velocity_b,
     roboduet_current_action,
     roboduet_current_ee_quat_in_base,
@@ -48,6 +50,7 @@ _ROBODUET_COMMAND_LOG_EXTRA_KEYS = (
 )
 _ROBODUET_DOG_ONLY_TERMS = ("tracking_lin_vel", "tracking_ang_vel")
 _ROBODUET_CONTACT_OFFSET_TERMS = ("tracking_contacts_shaped_force", "tracking_contacts_shaped_vel")
+_ROBODUET_LOG_ONLY_TERMS = ("vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy")
 
 
 def _ee_pose_command_term(env: ManagerBasedRLEnv, command_name: str):
@@ -3121,6 +3124,15 @@ def _compute_roboduet_reward_state(
     illegal_sensor = env.scene.sensors[illegal_contact_sensor_cfg.name]
     illegal_forces = illegal_sensor.data.net_forces_w[:, illegal_contact_sensor_cfg.body_ids, :]
     metrics["collision"] = torch.sum((torch.norm(illegal_forces, dim=-1) > 0.1).float(), dim=1)
+    base_pos_w, base_quat_w = roboduet_base_pose_w(robot)
+    _, base_pitch = _quat_to_roll_pitch(base_quat_w)
+    delta_z = term.commands_arm[:, 0] * torch.sin(term.commands_arm[:, 1]) + 0.38 - base_pos_w[:, 2]
+    orientation_guide = torch.zeros_like(base_pitch)
+    down_flag = delta_z < -0.10
+    up_flag = delta_z > 0.40
+    orientation_guide[down_flag] = torch.square(base_pitch - 0.4)[down_flag]
+    orientation_guide[up_flag] = torch.square(base_pitch + 0.3)[up_flag]
+    metrics["orientation_heuristic"] = orientation_guide
     current_lpy = roboduet_current_lpy(env, ee_body_cfg)
     current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
     lpy_range = torch.tensor(
@@ -3144,6 +3156,8 @@ def _compute_roboduet_reward_state(
     lpy_error = torch.sum(torch.abs(current_lpy - term.commands_arm_obs[:, :3]) / lpy_range, dim=1)
     rpy_error = torch.sum(torch.abs(current_abg - term.target_abg) / rpy_range, dim=1)
     metrics["arm_manip_commands_tracking_combine"] = torch.exp(-(manip_weight_lpy * lpy_error + manip_weight_rpy * rpy_error))
+    metrics["vis_manip_commands_tracking_lpy"] = torch.exp(-lpy_error)
+    metrics["vis_manip_commands_tracking_rpy"] = torch.exp(-rpy_error)
     metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
     metrics["arm_energy"] = torch.sum(
         torch.square(
@@ -3241,6 +3255,9 @@ def _compute_roboduet_reward_state(
             weighted_value = metric_value * scale
         weighted_value_scaled = weighted_value * reward_dt
         weighted_terms[name] = weighted_value
+        if name in _ROBODUET_LOG_ONLY_TERMS:
+            log_episode_sums[name] += weighted_value_scaled
+            continue
         reward_dog_linear += weighted_value
         reward_dog_linear_scaled += weighted_value_scaled
         term_sum = torch.sum(weighted_value_scaled)

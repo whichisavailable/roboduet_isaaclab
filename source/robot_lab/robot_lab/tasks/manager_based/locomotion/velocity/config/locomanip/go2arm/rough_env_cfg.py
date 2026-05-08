@@ -130,15 +130,18 @@ PRETRAINED_REWARD_SCALES = {
     "action_smoothness_1": -0.1,
     "action_smoothness_2": -0.1,
     "torques": -1.0e-5,
-    "hip_action_l2": -0.05,
 }
 
 HYBRID_REWARD_SCALES = {
     **PRETRAINED_REWARD_SCALES,
     "tracking_lin_vel": 0.7,
     "tracking_ang_vel": 0.25,
+    "orientation_heuristic": -2.0,
     "orientation_control": -10.0,
     "arm_manip_commands_tracking_combine": 1.0,
+    "vis_manip_commands_tracking_lpy": 1.0,
+    "vis_manip_commands_tracking_rpy": 1.0,
+    "hip_action_l2": -0.05,
     "arm_energy": -4.0e-5,
     "arm_dof_vel": -0.001,
     "arm_dof_acc": -2.5e-6,
@@ -361,6 +364,8 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "roll_limit": 0.10,
                 "pitch_limit": 0.20,
                 "headupdown_thres": 0.10,
+                "use_roll": False,
+                "use_pitch": True,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
