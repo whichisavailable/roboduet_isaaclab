@@ -177,7 +177,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.num_envs = 2048
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.merge_fixed_joints = False
-        self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
+        # Upstream auto_train collapses fixed joints, so fixed base/arm-mount bodies cannot collide internally.
+        # Local import keeps those fixed bodies separate; disabling self-collision is the closest stable equivalent.
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = False
         # Upstream scripts/auto_train.py forces Cfg.terrain.mesh_type = "plane".
         # Keep the rough task ID, but make its effective terrain semantics match auto_train.
         self.scene.terrain.terrain_type = "plane"
