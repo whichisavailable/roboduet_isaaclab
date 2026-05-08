@@ -72,13 +72,16 @@ GO2ARM_ARM_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joi
 
 # 机器人总关节顺序：腿在前，机械臂在后。
 GO2ARM_ALL_JOINT_NAMES = GO2ARM_LEG_JOINT_NAMES + GO2ARM_ARM_JOINT_NAMES
-GO2ARM_BASE_BODY_NAME = "base_link"
+# RoboDuet uses the actor root / dog trunk frame named "base" as the policy,
+# command, reward, and termination base frame.  "base_link" is the manipulator
+# mount above it and must not replace the dog base frame.
+GO2ARM_BASE_BODY_NAME = "base"
 
 # 四个足端 body 名称。
 GO2ARM_FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 GO2ARM_FOOT_NAMES = list(GO2ARM_FOOT_BODY_NAMES)
 GO2ARM_CONTACT_SENSOR_PRIM_PATH = (
-    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_calf(?:_link)?|base_link|link[1-6])$"
+    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_calf(?:_link)?|base|base_link|link[1-6])$"
 )
 # Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]

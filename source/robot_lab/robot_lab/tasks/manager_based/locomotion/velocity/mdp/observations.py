@@ -51,7 +51,8 @@ GO2ARM_LEG_JOINT_NAMES = (
 )
 GO2ARM_ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 GO2ARM_ALL_JOINT_NAMES = GO2ARM_LEG_JOINT_NAMES + GO2ARM_ARM_JOINT_NAMES
-GO2ARM_BASE_BODY_NAME = "base_link"
+GO2ARM_BASE_BODY_NAME = "base"
+GO2ARM_ARM_BASE_BODY_NAME = "base_link"
 GO2ARM_EE_BODY_NAME = "link6"
 # Local go2arm keeps the arm mount fixed bodies unmerged.  Upstream RoboDuet
 # policy/reward code uses the actor root ("base") as the dog base frame.  If
@@ -127,7 +128,7 @@ def _quat_to_abg(quat_wxyz: torch.Tensor) -> torch.Tensor:
 
 def _root_is_go2arm_base_link(asset: Articulation) -> bool:
     body_names = tuple(getattr(asset, "body_names", ()))
-    return bool(body_names) and body_names[0] == GO2ARM_BASE_BODY_NAME
+    return bool(body_names) and body_names[0] == GO2ARM_ARM_BASE_BODY_NAME
 
 
 def _go2arm_base_link_offset_from_base(asset: Articulation) -> torch.Tensor:
