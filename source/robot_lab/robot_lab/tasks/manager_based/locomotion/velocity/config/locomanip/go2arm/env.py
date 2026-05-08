@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from isaaclab.envs import ManagerBasedRLEnv
@@ -159,6 +161,54 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
         self._validate_go2arm_precise_foot_bodies()
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
+        self._configure_roboduet_gravity_randomization(cfg)
+
+    def _configure_roboduet_gravity_randomization(self, cfg) -> None:
+        self._roboduet_randomize_gravity = bool(getattr(cfg, "roboduet_randomize_gravity", False))
+        self._roboduet_nominal_gravity = tuple(float(value) for value in self.sim.cfg.gravity)
+        self._roboduet_gravity_range = tuple(float(value) for value in getattr(cfg, "roboduet_gravity_range", (-1.0, 1.0)))
+        interval_s = float(getattr(cfg, "roboduet_gravity_interval_s", 8.0))
+        duration = float(getattr(cfg, "roboduet_gravity_impulse_duration", 0.99))
+        self._roboduet_gravity_interval_steps = max(1, int(math.ceil(interval_s / self.step_dt)))
+        self._roboduet_gravity_duration_steps = max(
+            1, int(math.ceil(self._roboduet_gravity_interval_steps * duration))
+        )
+        if self._roboduet_randomize_gravity:
+            self._randomize_roboduet_gravity()
+
+    def _apply_roboduet_gravity(self, gravity_w: torch.Tensor) -> None:
+        gravity_list = [float(value) for value in gravity_w.detach().cpu().tolist()]
+        mdp.randomize_physics_scene_gravity(
+            self,
+            None,
+            gravity_distribution_params=(gravity_list, gravity_list),
+            operation="abs",
+            distribution="uniform",
+        )
+        gravity_dir = gravity_w.to(device=self.device, dtype=torch.float32)
+        gravity_dir = gravity_dir / torch.clamp(torch.linalg.norm(gravity_dir), min=1.0e-8)
+        robot = self.scene["robot"]
+        robot.data.GRAVITY_VEC_W[:] = gravity_dir.unsqueeze(0)
+
+    def _randomize_roboduet_gravity(self) -> None:
+        low, high = self._roboduet_gravity_range
+        nominal_gravity = torch.tensor(self._roboduet_nominal_gravity, dtype=torch.float32)
+        gravity_offset = torch.empty(3, dtype=torch.float32).uniform_(low, high)
+        self._apply_roboduet_gravity(nominal_gravity + gravity_offset)
+
+    def _reset_roboduet_gravity(self) -> None:
+        self._apply_roboduet_gravity(torch.tensor(self._roboduet_nominal_gravity, dtype=torch.float32))
+
+    def _update_roboduet_gravity_randomization(self) -> None:
+        if not self._roboduet_randomize_gravity:
+            return
+        step = int(self.common_step_counter)
+        interval = self._roboduet_gravity_interval_steps
+        duration = self._roboduet_gravity_duration_steps
+        if step > 0 and step % interval == 0:
+            self._randomize_roboduet_gravity()
+        if step >= duration and (step - duration) % interval == 0:
+            self._reset_roboduet_gravity()
 
     def set_plan_actions(self, plan_actions: torch.Tensor) -> None:
         """镜像 upstream `env.plan(...)`，先缓存，再把 pitch/roll 规划动作写回命令项。"""
@@ -692,6 +742,8 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
+        self.command_manager.compute(dt=self.step_dt)
+        self._update_roboduet_gravity_randomization()
         self.reset_buf = self.termination_manager.compute()
         self.reset_terminated = self.termination_manager.terminated
         self.reset_time_outs = self.termination_manager.time_outs
@@ -710,7 +762,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
                     self.sim.render()
             self.recorder_manager.record_post_reset(reset_env_ids)
 
-        self.command_manager.compute(dt=self.step_dt)
         if "interval" in self.event_manager.available_modes:
             self.event_manager.apply(mode="interval", dt=self.step_dt)
         self.obs_buf = self.observation_manager.compute(update_history=True)

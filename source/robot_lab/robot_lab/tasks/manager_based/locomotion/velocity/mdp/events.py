@@ -132,9 +132,56 @@ def randomize_com_positions(
     asset.root_physx_view.set_coms(com_offsets, env_ids)
 
 
+def randomize_rigid_body_material_consistent(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    friction_range: tuple[float, float],
+    restitution_range: tuple[float, float],
+):
+    """Randomize one friction/restitution pair per environment, matching upstream RoboDuet.
+
+    IsaacLab's built-in material randomizer samples material buckets per shape.  Upstream RoboDuet samples
+    a single friction and restitution value for each environment and applies it to all robot shapes.
+    """
+
+    asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids_cpu = torch.arange(env.scene.num_envs, device="cpu")
+    else:
+        env_ids_cpu = env_ids.detach().cpu().to(dtype=torch.long)
+
+    materials = asset.root_physx_view.get_material_properties()
+    num_envs = len(env_ids_cpu)
+    friction = torch.empty(num_envs, 1, device="cpu").uniform_(*friction_range)
+    restitution = torch.empty(num_envs, 1, device="cpu").uniform_(*restitution_range)
+    material_values = torch.cat((friction, friction, restitution), dim=1)
+
+    if isinstance(asset_cfg.body_ids, slice):
+        materials[env_ids_cpu, :, :] = material_values[:, None, :]
+    else:
+        num_shapes_per_body = _get_num_shapes_per_body(asset)
+        for body_id in asset_cfg.body_ids:
+            start_idx = sum(num_shapes_per_body[:body_id])
+            end_idx = start_idx + num_shapes_per_body[body_id]
+            materials[env_ids_cpu, start_idx:end_idx, :] = material_values[:, None, :]
+
+    asset.root_physx_view.set_material_properties(materials, env_ids_cpu)
+
+
 """
 Internal helper functions.
 """
+
+
+def _get_num_shapes_per_body(asset: RigidObject | Articulation) -> list[int]:
+    if not isinstance(asset, Articulation):
+        return [asset.root_physx_view.max_shapes]
+    num_shapes_per_body = []
+    for link_path in asset.root_physx_view.link_paths[0]:
+        link_physx_view = asset._physics_sim_view.create_rigid_body_view(link_path)
+        num_shapes_per_body.append(link_physx_view.max_shapes)
+    return num_shapes_per_body
 
 
 def _randomize_prop_by_op(

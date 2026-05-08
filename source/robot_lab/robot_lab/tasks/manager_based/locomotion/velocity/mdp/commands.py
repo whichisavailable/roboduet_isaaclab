@@ -865,7 +865,7 @@ class RoboDuetCommandCfg(CommandTermCfg):
     gait_frequency: float = 3.0
     gait_duration: float = 0.5
     gait_kappa: float = 0.07
-    commands_scale_dog: tuple[float, float, float, float, float] = (1.0, 1.0, 1.0, 1.0, 1.0)
+    commands_scale_dog: tuple[float, float, float, float, float] = (2.0, 2.0, 0.25, 1.0, 1.0)
 
     def __post_init__(self):
         self.class_type = RoboDuetCommand

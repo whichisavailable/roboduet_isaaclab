@@ -160,6 +160,10 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     enable_contact_verification_logging: bool = False
     enable_termination_debug_logging: bool = False
     enable_play_termination_reason_logging: bool = False
+    roboduet_randomize_gravity: bool = True
+    roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)
+    roboduet_gravity_interval_s: float = 8.0
+    roboduet_gravity_impulse_duration: float = 0.99
     episode_log_key_prefixes: tuple[str, ...] = (
         "rew_",
         "Len/",
@@ -176,6 +180,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         super().__post_init__()
 
         self.scene.num_envs = 2048
+        self.sim.gravity = (0.0, 0.0, -9.8)
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.merge_fixed_joints = False
         self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
@@ -296,14 +301,12 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.ee_tracking_potential = None
 
         self.events.randomize_rigid_body_material = EventTerm(
-            func=mdp.randomize_rigid_body_material,
+            func=mdp.randomize_rigid_body_material_consistent,
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "static_friction_range": (0.1, 3.0),
-                "dynamic_friction_range": (0.1, 3.0),
+                "friction_range": (0.1, 3.0),
                 "restitution_range": (0.0, 0.4),
-                "num_buckets": 64,
             },
         )
         self.events.randomize_rigid_body_mass_base = EventTerm(
