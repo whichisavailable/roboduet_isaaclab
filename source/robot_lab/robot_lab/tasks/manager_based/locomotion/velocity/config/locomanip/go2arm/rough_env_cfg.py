@@ -160,14 +160,10 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     enable_contact_verification_logging: bool = False
     enable_termination_debug_logging: bool = False
     enable_play_termination_reason_logging: bool = False
-    enable_base_frame_validation_logging: bool = True
-    base_frame_validation_log_steps: int = 5
-    base_frame_validation_done_logs: int = 5
     episode_log_key_prefixes: tuple[str, ...] = (
         "rew_",
         "Len/",
         "Term/",
-        "BaseFrame/",
         "Curriculum/",
     )
 
