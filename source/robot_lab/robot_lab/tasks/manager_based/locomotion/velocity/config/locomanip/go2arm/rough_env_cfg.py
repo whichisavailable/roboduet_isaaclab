@@ -159,6 +159,13 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     enable_contact_verification_logging: bool = False
     enable_termination_debug_logging: bool = False
     enable_play_termination_reason_logging: bool = False
+    episode_log_key_prefixes: tuple[str, ...] = (
+        "rew_",
+        "R/",
+        "Len/",
+        "Term/",
+        "Curriculum/",
+    )
 
     def _terrain_contact_filter_prim_paths(self) -> list[str]:
         if self.scene.terrain.terrain_type == "plane":

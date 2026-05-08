@@ -13,14 +13,10 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-try:
-    from rsl_rl.utils.logger import Logger
-except ModuleNotFoundError:
-    from .logger_compat import Logger
-
 from .automatic_models import ArmActorCritic, DogActorCritic
 from .automatic_ppo import AutomaticPPO
 from .callable_resolver import resolve_callable
+from .logger_compat import Logger
 
 
 class RoboDuetAutomaticInferencePolicy(nn.Module):
@@ -330,6 +326,15 @@ class RoboDuetAutomaticRunner:
             f"{prefix}/adaptation_module_test": float(loss_tuple[5]),
         }
 
+    @staticmethod
+    def _make_zero_loss_dict(prefix: str) -> dict[str, float]:
+        return {
+            f"{prefix}/value_function": 0.0,
+            f"{prefix}/surrogate": 0.0,
+            f"{prefix}/adaptation_module": 0.0,
+            f"{prefix}/adaptation_module_test": 0.0,
+        }
+
     def _process_arm_reward_step(self, rewards_arm: torch.Tensor, dones: torch.Tensor) -> None:
         self.cur_arm_reward_sum += rewards_arm
         new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -422,6 +427,8 @@ class RoboDuetAutomaticRunner:
             loss_dict = self._make_loss_dict("dog", dog_loss_tuple)
             if arm_loss_tuple is not None:
                 loss_dict.update(self._make_loss_dict("arm", arm_loss_tuple))
+            else:
+                loss_dict.update(self._make_zero_loss_dict("arm"))
             action_std = (
                 torch.cat((self.dog_model.std.detach(), self.arm_model.std.detach()))
                 if self._command_term().switch_open
@@ -436,6 +443,10 @@ class RoboDuetAutomaticRunner:
                 loss_dict=loss_dict,
                 learning_rate=self.alg_dog.learning_rate,
                 action_std=action_std,
+                policy_std_dict={
+                    "dog": self.dog_model.std.detach(),
+                    "arm": self.arm_model.std.detach(),
+                },
                 rnd_weight=None,
             )
             self._log_roboduet_scalars(it)

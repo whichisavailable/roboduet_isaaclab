@@ -14,6 +14,23 @@ import torch
 import rsl_rl
 
 
+_LOSS_LABELS = {
+    "value_function": "Value function",
+    "surrogate": "Surrogate",
+    "adaptation_module": "Adaptation",
+    "adaptation_module_test": "Adaptation test",
+}
+
+
+def _format_loss_label(key: str) -> str:
+    if "/" not in key:
+        return f"Mean {key} loss:"
+    prefix, name = key.split("/", 1)
+    policy = prefix[:1].upper() + prefix[1:]
+    label = _LOSS_LABELS.get(name, name.replace("_", " "))
+    return f"{policy} {label} loss:"
+
+
 class Logger:
     """Compatibility logger with the same console/TensorBoard style as RSL-RL."""
 
@@ -122,7 +139,8 @@ class Logger:
         loss_dict: dict,
         learning_rate: float,
         action_std: torch.Tensor,
-        rnd_weight: float | None,
+        policy_std_dict: dict[str, torch.Tensor] | None = None,
+        rnd_weight: float | None = None,
         print_minimal: bool = False,
         width: int = 80,
         pad: int = 40,
@@ -159,6 +177,9 @@ class Logger:
             self.writer.add_scalar(f"Loss/{key}", value, it)
         self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
         self.writer.add_scalar("Policy/mean_std", action_std.mean().item(), it)
+        if policy_std_dict is not None:
+            for policy_name, policy_std in policy_std_dict.items():
+                self.writer.add_scalar(f"Policy/{policy_name}_mean_std", policy_std.mean().item(), it)
 
         fps = int(collection_size / (collect_time + learn_time))
         self.writer.add_scalar("Perf/total_fps", fps, it)
@@ -180,30 +201,36 @@ class Logger:
 
         log_string = f"""{"#" * width}\n"""
         log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
+        if not print_minimal:
+            log_string += extras_string
+            if extras_string:
+                log_string += f"""{"-" * width}\n"""
         run_name = self.cfg.get("run_name")
-        log_string += f"""{"Run name:":>{pad}} {run_name}\n""" if run_name else ""
+        log_string += f"""\033[1m{"run_name:":>{pad}} {run_name}\033[0m \n""" if run_name else ""
         log_string += (
-            f"""{"Total steps:":>{pad}} {self.tot_timesteps} \n"""
-            f"""{"Steps per second:":>{pad}} {fps:.0f} \n"""
-            f"""{"Collection time:":>{pad}} {collect_time:.3f}s \n"""
-            f"""{"Learning time:":>{pad}} {learn_time:.3f}s \n"""
+            f"""{'Computation:':>{pad}} {fps:.0f} steps/s """
+            f"""(collection: {collect_time:.3f}s, learning: {learn_time:.3f}s)\n"""
         )
+        if policy_std_dict is not None:
+            for policy_name, policy_std in policy_std_dict.items():
+                label = f"{policy_name[:1].upper() + policy_name[1:]} action std:"
+                log_string += f"""{label:>{pad}} {policy_std.mean().item():.4f}\n"""
+        else:
+            log_string += f"""{"Mean action std:":>{pad}} {action_std.mean().item():.2f}\n"""
         for key, value in loss_dict.items():
-            log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
+            log_string += f"""{_format_loss_label(key):>{pad}} {value:.8f}\n"""
         if len(self.rewbuffer) > 0:
             if self.cfg["algorithm"].get("rnd_cfg"):
                 log_string += f"""{"Mean extrinsic reward:":>{pad}} {statistics.mean(self.erewbuffer):.2f}\n"""
                 log_string += f"""{"Mean intrinsic reward:":>{pad}} {statistics.mean(self.irewbuffer):.2f}\n"""
-            log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
-            log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
-        log_string += f"""{"Mean action std:":>{pad}} {action_std.mean().item():.2f}\n"""
-        if not print_minimal:
-            log_string += extras_string
+            log_string += f"""{"Mean reward (total):":>{pad}} {statistics.mean(self.rewbuffer):.4f}\n"""
+            log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.4f}\n"""
         done_it = it + 1 - start_it
         remaining_it = total_it - start_it - done_it
         eta = self.tot_time / done_it * remaining_it
         log_string += (
             f"""{"-" * width}\n"""
+            f"""{"Total steps:":>{pad}} {self.tot_timesteps}\n"""
             f"""{"Iteration time:":>{pad}} {iteration_time:.2f}s\n"""
             f"""{"Time elapsed:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(self.tot_time))}\n"""
             f"""{"ETA:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(eta))}\n"""
