@@ -201,10 +201,6 @@ class Logger:
 
         log_string = f"""{"#" * width}\n"""
         log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
-        if not print_minimal:
-            log_string += extras_string
-            if extras_string:
-                log_string += f"""{"-" * width}\n"""
         run_name = self.cfg.get("run_name")
         log_string += f"""\033[1m{"run_name:":>{pad}} {run_name}\033[0m \n""" if run_name else ""
         log_string += (
@@ -225,6 +221,8 @@ class Logger:
                 log_string += f"""{"Mean intrinsic reward:":>{pad}} {statistics.mean(self.irewbuffer):.2f}\n"""
             log_string += f"""{"Mean reward (total):":>{pad}} {statistics.mean(self.rewbuffer):.4f}\n"""
             log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.4f}\n"""
+        if not print_minimal:
+            log_string += extras_string
         done_it = it + 1 - start_it
         remaining_it = total_it - start_it - done_it
         eta = self.tot_time / done_it * remaining_it

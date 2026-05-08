@@ -617,12 +617,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             count=1.0,
         )
         episode_dict["Term/terminated"] = terminated[done_mask].float().mean()
-        self._accumulate_log_only(
-            "Term/truncated",
-            truncated[done_mask].float().mean().item(),
-            count=1.0,
-        )
-        episode_dict["Term/truncated"] = truncated[done_mask].float().mean()
 
         for term_name in self.termination_manager.active_terms:
             term_value = self.termination_manager.get_term(term_name).float()

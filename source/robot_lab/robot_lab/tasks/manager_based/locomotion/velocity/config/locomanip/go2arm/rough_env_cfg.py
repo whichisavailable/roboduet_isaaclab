@@ -161,7 +161,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     enable_play_termination_reason_logging: bool = False
     episode_log_key_prefixes: tuple[str, ...] = (
         "rew_",
-        "R/",
         "Len/",
         "Term/",
         "Curriculum/",
