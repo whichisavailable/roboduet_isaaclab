@@ -12,6 +12,7 @@
 
 import argparse
 import os
+import re
 import sys
 
 from isaaclab.app import AppLauncher
@@ -33,6 +34,12 @@ parser.add_argument(
         "Auto-cap num_envs to this value when GPU memory is <= 4.5 GiB and --num_envs is not provided. "
         "Disabled by default to keep RoboDuet auto_train semantics explicit."
     ),
+)
+parser.add_argument(
+    "--roboduet_alignment_check",
+    action="store_true",
+    default=False,
+    help="Create the RoboDuet environment and check key effective training semantics, then exit without training.",
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -270,6 +277,132 @@ def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
     )
 
 
+def _run_roboduet_alignment_check(env, agent_cfg) -> None:
+    """Check RoboDuet effective training semantics and exit before training."""
+    raw_env = env.unwrapped
+    obs = env.get_observations()
+    checks: list[tuple[str, object, object, bool]] = []
+
+    def add_check(name: str, actual: object, expected: object, ok: bool | None = None) -> None:
+        if ok is None:
+            ok = actual == expected
+        checks.append((name, actual, expected, bool(ok)))
+
+    def add_close_check(name: str, actual: float, expected: float, tol: float = 1.0e-6) -> None:
+        add_check(name, actual, expected, abs(float(actual) - float(expected)) <= tol)
+
+    add_check("dog_policy_obs_dim", int(obs["dog_policy"].shape[-1]), 56)
+    add_check("dog_privileged_obs_dim", int(obs["dog_privileged"].shape[-1]), 2)
+    add_check("arm_policy_obs_dim", int(obs["arm_policy"].shape[-1]), 20)
+    add_check("arm_privileged_obs_dim", int(obs["arm_privileged"].shape[-1]), 9)
+    add_check("dog_action_dim", int(agent_cfg.dog_model.num_actions), 12)
+    add_check("arm_action_dim", int(agent_cfg.arm_model.num_actions), 6)
+    add_check("arm_plan_action_dim", int(agent_cfg.arm_model.num_plan_actions), 2)
+    add_check("full_action_dim", int(env.num_actions), 18)
+    add_close_check("step_dt", float(raw_env.step_dt), 0.02)
+    add_check("max_episode_length_steps", int(raw_env.max_episode_length), 1000)
+    add_check("num_steps_per_env", int(agent_cfg.num_steps_per_env), 24)
+
+    command_term = raw_env.command_manager.get_term("roboduet")
+    action_term = raw_env.action_manager.get_term("joint_pos")
+
+    robot = raw_env.scene["robot"]
+    all_joint_names = tuple(robot.joint_names)
+    leg_joint_ids = getattr(raw_env, "_go2arm_leg_joint_ids", None)
+    if leg_joint_ids is None:
+        leg_joint_ids, _ = robot.find_joints([r"^(FL|FR|RL|RR)_(hip|thigh|calf)_joint$"], preserve_order=True)
+    leg_joint_names = tuple(all_joint_names[int(joint_id)] for joint_id in leg_joint_ids)
+    leg_joint_name_set = set(leg_joint_names)
+    expected_stage1_frozen_joint_names = tuple(
+        joint_name for joint_name in all_joint_names if joint_name not in leg_joint_name_set
+    )
+
+    action_joint_names = tuple(getattr(action_term, "_joint_names", ()))
+    fixed_joint_ids = getattr(action_term, "_fixed_delta_action_joint_ids", None)
+    if fixed_joint_ids is not None:
+        if isinstance(fixed_joint_ids, torch.Tensor):
+            fixed_joint_ids = fixed_joint_ids.detach().cpu().tolist()
+        stage1_frozen_joint_names = tuple(action_joint_names[int(joint_id)] for joint_id in fixed_joint_ids)
+    else:
+        fixed_joint_name_patterns = getattr(action_term.cfg, "fixed_delta_action_joint_names", None)
+        if fixed_joint_name_patterns is None:
+            stage1_frozen_joint_names = ()
+        else:
+            stage1_frozen_joint_names = tuple(
+                joint_name
+                for joint_name in action_joint_names
+                if any(re.fullmatch(pattern, joint_name) for pattern in fixed_joint_name_patterns)
+            )
+    stage1_frozen_joint_name_set = set(stage1_frozen_joint_names)
+    actual_stage1_frozen_joint_names = tuple(
+        joint_name for joint_name in all_joint_names if joint_name in stage1_frozen_joint_name_set
+    )
+    missing_stage1_frozen_non_leg_joint_names = tuple(
+        joint_name for joint_name in expected_stage1_frozen_joint_names if joint_name not in stage1_frozen_joint_name_set
+    )
+    unexpected_stage1_frozen_joint_names = tuple(
+        joint_name for joint_name in stage1_frozen_joint_names if joint_name not in expected_stage1_frozen_joint_names
+    )
+    duplicate_stage1_frozen_joint_names = tuple(
+        joint_name for joint_name in stage1_frozen_joint_names if stage1_frozen_joint_names.count(joint_name) > 1
+    )
+    add_check(
+        "stage1_frozen_joint_names_equal_non_leg_joint_names",
+        actual_stage1_frozen_joint_names,
+        expected_stage1_frozen_joint_names,
+        stage1_frozen_joint_name_set == set(expected_stage1_frozen_joint_names)
+        and len(stage1_frozen_joint_names) == len(stage1_frozen_joint_name_set),
+    )
+    add_check("stage1_unfrozen_non_leg_joint_names", missing_stage1_frozen_non_leg_joint_names, ())
+    add_check("stage1_unexpected_frozen_joint_names", unexpected_stage1_frozen_joint_names, ())
+    add_check("stage1_duplicate_frozen_joint_names", duplicate_stage1_frozen_joint_names, ())
+
+    expected_switch_iteration = 0 if bool(getattr(agent_cfg, "roboduet_disable_two_stage", False)) else 10000
+    explicit_switch_iteration = getattr(agent_cfg, "roboduet_stage_switch_iteration", None)
+    if explicit_switch_iteration is not None:
+        expected_switch_iteration = int(explicit_switch_iteration)
+    elif getattr(agent_cfg, "roboduet_pretrained_dog_checkpoint", None) and getattr(
+        agent_cfg, "roboduet_pretrained_arm_checkpoint", None
+    ):
+        expected_switch_iteration = 2000
+    add_check("command_switch_iteration", int(command_term.cfg.switch_iteration), expected_switch_iteration)
+    add_check(
+        "action_fixed_until_iteration",
+        int(action_term.cfg.fixed_delta_action_until_iteration),
+        expected_switch_iteration,
+    )
+    expected_initial_switch_open = expected_switch_iteration <= 0
+    add_check("initial_switch_open", bool(command_term.switch_open), expected_initial_switch_open)
+
+    active_terms = tuple(raw_env.termination_manager.active_terms)
+    effective_non_timeout_terms = []
+    for term_name in active_terms:
+        term_cfg = raw_env.termination_manager.get_term_cfg(term_name)
+        if term_cfg.time_out:
+            continue
+        if term_name == "reverse_termination" and not command_term.switch_open:
+            continue
+        effective_non_timeout_terms.append(term_name)
+    add_check(
+        "stage1_effective_non_timeout_terminations",
+        tuple(effective_non_timeout_terms),
+        ("base_height_termination",),
+    )
+
+    print("\n[INFO] RoboDuet alignment check results:")
+    failed = []
+    for name, actual, expected, ok in checks:
+        status = "OK" if ok else "FAIL"
+        print(f"  [{status}] {name}: actual={actual!r}, expected={expected!r}")
+        if not ok:
+            failed.append(name)
+
+    if failed:
+        failed_list = ", ".join(failed)
+        raise RuntimeError(f"RoboDuet alignment check failed: {failed_list}")
+    print("[INFO] RoboDuet alignment check passed. Training was not started.\n")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -395,6 +528,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # load previously trained model
         runner.load(resume_path)
         _sync_resume_iteration_to_env(runner, env, agent_cfg)
+
+    if args_cli.roboduet_alignment_check:
+        _run_roboduet_alignment_check(env, agent_cfg)
+        env.close()
+        return
 
     if agent_cfg.class_name != (
         "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner:"

@@ -3363,7 +3363,10 @@ def roboduet_weighted_reward_term(
         manip_weight_lpy=manip_weight_lpy,
         manip_weight_rpy=manip_weight_rpy,
     )
-    return reward_state["weighted_terms"][reward_term_name]
+    weighted_term = reward_state["weighted_terms"][reward_term_name]
+    if reward_term_name in _ROBODUET_LOG_ONLY_TERMS:
+        return torch.zeros_like(weighted_term)
+    return weighted_term
 
 
 def roboduet_total_reward_adjustment(
