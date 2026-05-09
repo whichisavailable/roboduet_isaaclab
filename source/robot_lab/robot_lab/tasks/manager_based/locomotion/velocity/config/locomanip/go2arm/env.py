@@ -11,7 +11,10 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.sensors import ContactSensor
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
-from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import GO2ARM_ARM_JOINT_NAMES
+from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import (
+    GO2ARM_ARM_JOINT_NAMES,
+    GO2ARM_LEG_JOINT_NAMES,
+)
 
 
 class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
@@ -161,7 +164,79 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
         self._validate_go2arm_precise_foot_bodies()
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
+        self._go2arm_leg_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_LEG_JOINT_NAMES, preserve_order=True)
+        self._configure_roboduet_motor_randomization(cfg)
         self._configure_roboduet_gravity_randomization(cfg)
+
+    def _configure_roboduet_motor_randomization(self, cfg) -> None:
+        robot = self.scene["robot"]
+        self._roboduet_randomize_motor_strength = bool(getattr(cfg, "roboduet_randomize_motor_strength", False))
+        self._roboduet_randomize_motor_offset = bool(getattr(cfg, "roboduet_randomize_motor_offset", False))
+        self._roboduet_motor_strength_range = tuple(
+            float(value) for value in getattr(cfg, "roboduet_motor_strength_range", (0.9, 1.1))
+        )
+        self._roboduet_motor_offset_range = tuple(
+            float(value) for value in getattr(cfg, "roboduet_motor_offset_range", (-0.02, 0.02))
+        )
+        interval_s = float(getattr(cfg, "roboduet_motor_randomization_interval_s", 4.0))
+        self._roboduet_motor_randomization_interval_steps = max(1, int(math.ceil(interval_s / self.step_dt)))
+        self._roboduet_motor_strengths = torch.ones(
+            self.num_envs, robot.data.default_joint_pos.shape[1], dtype=torch.float32, device=self.device
+        )
+        self._roboduet_motor_offsets = torch.zeros_like(self._roboduet_motor_strengths)
+        self._roboduet_leg_joint_ids_tensor = torch.as_tensor(
+            self._go2arm_leg_joint_ids, dtype=torch.long, device=self.device
+        )
+        self._roboduet_actuator_base_gains = {
+            name: (actuator.stiffness.detach().clone(), actuator.damping.detach().clone())
+            for name, actuator in robot.actuators.items()
+        }
+        self._randomize_roboduet_motor_props(torch.arange(self.num_envs, device=self.device))
+
+    def _apply_roboduet_motor_strength_to_actuators(self) -> None:
+        robot = self.scene["robot"]
+        leg_joint_ids = set(int(joint_id) for joint_id in self._go2arm_leg_joint_ids)
+        for name, actuator in robot.actuators.items():
+            base_stiffness, base_damping = self._roboduet_actuator_base_gains[name]
+            factors = torch.ones_like(base_stiffness)
+            joint_indices = actuator.joint_indices
+            if isinstance(joint_indices, slice):
+                joint_indices = range(*joint_indices.indices(robot.num_joints))
+            for local_id, global_joint_id in enumerate(joint_indices):
+                if int(global_joint_id) in leg_joint_ids:
+                    factors[:, local_id] = self._roboduet_motor_strengths[:, int(global_joint_id)]
+            actuator.stiffness[:] = base_stiffness * factors
+            actuator.damping[:] = base_damping * factors
+
+    def _randomize_roboduet_motor_props(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        if self._roboduet_randomize_motor_strength:
+            low, high = self._roboduet_motor_strength_range
+            values = torch.rand(env_ids.numel(), 1, dtype=torch.float32, device=self.device) * (high - low) + low
+            self._roboduet_motor_strengths[env_ids, :] = values
+        else:
+            self._roboduet_motor_strengths[env_ids, :] = 1.0
+        if self._roboduet_randomize_motor_offset:
+            low, high = self._roboduet_motor_offset_range
+            self._roboduet_motor_offsets[env_ids, :] = (
+                torch.rand(
+                    env_ids.numel(),
+                    self._roboduet_motor_offsets.shape[1],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                * (high - low)
+                + low
+            )
+        else:
+            self._roboduet_motor_offsets[env_ids, :] = 0.0
+        self._apply_roboduet_motor_strength_to_actuators()
+
+    def _reset_idx(self, env_ids: torch.Tensor):
+        super()._reset_idx(env_ids)
+        if hasattr(self, "_roboduet_motor_strengths"):
+            self._randomize_roboduet_motor_props(env_ids)
 
     def _configure_roboduet_gravity_randomization(self, cfg) -> None:
         self._roboduet_randomize_gravity = bool(getattr(cfg, "roboduet_randomize_gravity", False))
@@ -743,6 +818,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.command_manager.compute(dt=self.step_dt)
+        motor_rand_ids = torch.where(
+            self.episode_length_buf % self._roboduet_motor_randomization_interval_steps == 0
+        )[0]
+        self._randomize_roboduet_motor_props(motor_rand_ids)
         self._update_roboduet_gravity_randomization()
         self.reset_buf = self.termination_manager.compute()
         self.reset_terminated = self.termination_manager.terminated

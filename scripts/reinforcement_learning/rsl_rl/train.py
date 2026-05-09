@@ -28,8 +28,11 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument(
     "--low_vram_num_envs",
     type=int,
-    default=64,
-    help="Auto-cap num_envs to this value when GPU memory is <= 4.5 GiB and --num_envs is not provided.",
+    default=None,
+    help=(
+        "Auto-cap num_envs to this value when GPU memory is <= 4.5 GiB and --num_envs is not provided. "
+        "Disabled by default to keep RoboDuet auto_train semantics explicit."
+    ),
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -276,6 +279,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if int(agent_cfg.seed) == -1:
+        agent_cfg.seed = int(torch.randint(0, 10000, (1,)).item())
+        print(f"[INFO] RoboDuet random seed selected: {agent_cfg.seed}")
 
     # auto downscale environment count for low-VRAM GPUs when user doesn't override --num_envs
     if args_cli.num_envs is None and args_cli.low_vram_num_envs is not None:

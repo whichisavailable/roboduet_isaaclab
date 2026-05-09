@@ -337,6 +337,12 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             ]
             if hip_ids:
                 self._hip_scale_joint_ids = torch.tensor(hip_ids, dtype=torch.long, device=self.device)
+        self._arm_strength_joint_ids = torch.tensor(
+            [joint_id for joint_id, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_ARM_JOINT_NAMES],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._roboduet_global_joint_ids = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
 
     def process_actions(self, actions: torch.Tensor):
         # Store the effective action after any curriculum mask, so observations/rewards see executed deltas.
@@ -366,6 +372,13 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             delta_actions = torch.clamp(delta_actions, min=self._delta_clip[:, :, 0], max=self._delta_clip[:, :, 1])
         # 最终目标保持为：default_joint_pos + delta_action，不再额外乘一个 scale。
         self._processed_actions = delta_actions + self._offset
+        motor_offsets = getattr(self._env, "_roboduet_motor_offsets", None)
+        if motor_offsets is not None:
+            self._processed_actions = self._processed_actions + motor_offsets[:, self._roboduet_global_joint_ids]
+        motor_strengths = getattr(self._env, "_roboduet_motor_strengths", None)
+        if motor_strengths is not None and self._arm_strength_joint_ids.numel() > 0:
+            arm_global_ids = self._roboduet_global_joint_ids[self._arm_strength_joint_ids]
+            self._processed_actions[:, self._arm_strength_joint_ids] *= motor_strengths[:, arm_global_ids]
         self._env._go2arm_joint_pos_target = self._processed_actions.detach().clone()
 
     def reset(self, env_ids=None):
@@ -1153,12 +1166,12 @@ class LocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         """Post initialization."""
-        # 控制频率相关设置：每 8 个物理步执行一次策略。
-        self.decimation = 8
+        # Match upstream RoboDuet auto_train: sim.dt=0.005 and control.decimation=4.
+        # This preserves the 50 Hz policy rate while keeping the same PhysX step semantics.
+        self.decimation = 4
         # 单个 episode 的时长。
         self.episode_length_s = 20.0
-        # 物理仿真步长，当前为 400Hz。
-        self.sim.dt = 0.0025
+        self.sim.dt = 0.005
         # 渲染间隔与控制间隔保持一致。
         self.sim.render_interval = self.decimation
         # 直接复用场景地形材质作为仿真默认材质。
