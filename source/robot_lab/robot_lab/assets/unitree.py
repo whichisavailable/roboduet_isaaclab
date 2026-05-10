@@ -6,7 +6,7 @@ Reference: https://github.com/unitreerobotics/unitree_ros
 """
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, DelayedPDActuatorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import DCMotorCfg, DelayedPDActuatorCfg, IdealPDActuatorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 from robot_lab.assets import ISAACLAB_ASSETS_DATA_DIR
@@ -65,22 +65,24 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
     # - calf: 4 个腿部关节（*_calf_joint）
     # - upper: 6 个机械臂关节（joint1..joint6）
     actuators={
-        "leg_hip_thigh": DCMotorCfg(
+        "leg_hip_thigh": IdealPDActuatorCfg(
             joint_names_expr=[r".*_hip_joint", r".*_thigh_joint"],
             effort_limit=23.7,
-            saturation_effort=23.7,
             velocity_limit=30.1,
-            stiffness=40.0,
-            damping=1.0,
+            # RoboDuet `control_type=M` computes leg PD torques in the task action term.
+            # Keep the IsaacLab explicit actuator as a pure effort pass-through with static clipping.
+            stiffness=0.0,
+            damping=0.0,
             friction=0.0,
         ),
-        "leg_calf": DCMotorCfg(
+        "leg_calf": IdealPDActuatorCfg(
             joint_names_expr=[r".*_calf_joint"],
             effort_limit=45.43,
-            saturation_effort=45.43,
             velocity_limit=15.70,
-            stiffness=40.0,
-            damping=1.0,
+            # RoboDuet `control_type=M` computes leg PD torques in the task action term.
+            # Keep the IsaacLab explicit actuator as a pure effort pass-through with static clipping.
+            stiffness=0.0,
+            damping=0.0,
             friction=0.0,
         ),
         "arm": DelayedPDActuatorCfg(

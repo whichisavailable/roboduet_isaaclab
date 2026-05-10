@@ -187,26 +187,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_leg_joint_ids_tensor = torch.as_tensor(
             self._go2arm_leg_joint_ids, dtype=torch.long, device=self.device
         )
-        self._roboduet_actuator_base_gains = {
-            name: (actuator.stiffness.detach().clone(), actuator.damping.detach().clone())
-            for name, actuator in robot.actuators.items()
-        }
         self._randomize_roboduet_motor_props(torch.arange(self.num_envs, device=self.device))
-
-    def _apply_roboduet_motor_strength_to_actuators(self) -> None:
-        robot = self.scene["robot"]
-        leg_joint_ids = set(int(joint_id) for joint_id in self._go2arm_leg_joint_ids)
-        for name, actuator in robot.actuators.items():
-            base_stiffness, base_damping = self._roboduet_actuator_base_gains[name]
-            factors = torch.ones_like(base_stiffness)
-            joint_indices = actuator.joint_indices
-            if isinstance(joint_indices, slice):
-                joint_indices = range(*joint_indices.indices(robot.num_joints))
-            for local_id, global_joint_id in enumerate(joint_indices):
-                if int(global_joint_id) in leg_joint_ids:
-                    factors[:, local_id] = self._roboduet_motor_strengths[:, int(global_joint_id)]
-            actuator.stiffness[:] = base_stiffness * factors
-            actuator.damping[:] = base_damping * factors
 
     def _randomize_roboduet_motor_props(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -231,7 +212,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             )
         else:
             self._roboduet_motor_offsets[env_ids, :] = 0.0
-        self._apply_roboduet_motor_strength_to_actuators()
 
     def _reset_idx(self, env_ids: torch.Tensor):
         super()._reset_idx(env_ids)

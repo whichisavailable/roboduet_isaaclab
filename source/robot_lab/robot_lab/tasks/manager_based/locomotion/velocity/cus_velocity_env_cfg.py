@@ -302,7 +302,7 @@ class Go2ArmTeacherCommandsCfg:
 
 
 class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
-    """以默认关节姿态为零点、直接输出关节偏移量的动作项。"""
+    """RoboDuet `control_type=M`: legs use direct torque, arm uses position target."""
 
     cfg: "Go2ArmDefaultDeltaJointPositionActionCfg"
 
@@ -310,8 +310,27 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         super().__init__(cfg, env)
         self._env = env
         self._action_scale = float(cfg.action_scale)
-        # 这里显式解析“偏移量 clip”，而不是沿用 JointAction 里对最终绝对目标的 clip。
-        # 目标是让策略直接输出“弧度偏移”，再把偏移限制在一个合理小范围内。
+        self._roboduet_global_joint_ids = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
+
+        leg_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_LEG_JOINT_NAMES]
+        arm_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_ARM_JOINT_NAMES]
+        self._leg_action_ids = torch.tensor(leg_action_ids, dtype=torch.long, device=self.device)
+        self._arm_action_ids = torch.tensor(arm_action_ids, dtype=torch.long, device=self.device)
+        self._leg_joint_ids = self._roboduet_global_joint_ids[self._leg_action_ids]
+        self._arm_joint_ids = self._roboduet_global_joint_ids[self._arm_action_ids]
+        self._leg_joint_ids_list = [int(joint_id) for joint_id in self._leg_joint_ids.tolist()]
+        self._arm_joint_ids_list = [int(joint_id) for joint_id in self._arm_joint_ids.tolist()]
+        self._leg_kp = torch.full(
+            (self.num_envs, len(leg_action_ids)), float(cfg.leg_stiffness), dtype=torch.float32, device=self.device
+        )
+        self._leg_kd = torch.full(
+            (self.num_envs, len(leg_action_ids)), float(cfg.leg_damping), dtype=torch.float32, device=self.device
+        )
+        self._leg_position_target = self._asset.data.default_joint_pos[:, self._leg_joint_ids].clone()
+        self._arm_position_target = self._asset.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        self._leg_motor_offsets = torch.zeros_like(self._leg_position_target)
+        self._leg_motor_strengths = torch.ones_like(self._leg_position_target)
+
         self._delta_clip = None
         if cfg.delta_clip is not None:
             self._delta_clip = torch.tensor([[-float("inf"), float("inf")]], device=self.device).repeat(
@@ -319,6 +338,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             )
             index_list, _, value_list = string_utils.resolve_matching_names_values(cfg.delta_clip, self._joint_names)
             self._delta_clip[:, index_list] = torch.tensor(value_list, device=self.device)
+
         self._fixed_delta_action_joint_ids = None
         if cfg.fixed_delta_action_joint_names is not None:
             fixed_ids = [
@@ -328,6 +348,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             ]
             if fixed_ids:
                 self._fixed_delta_action_joint_ids = torch.tensor(fixed_ids, dtype=torch.long, device=self.device)
+
         self._hip_scale_joint_ids = None
         if cfg.hip_joint_names is not None:
             hip_ids = [
@@ -337,12 +358,6 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             ]
             if hip_ids:
                 self._hip_scale_joint_ids = torch.tensor(hip_ids, dtype=torch.long, device=self.device)
-        self._arm_strength_joint_ids = torch.tensor(
-            [joint_id for joint_id, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_ARM_JOINT_NAMES],
-            dtype=torch.long,
-            device=self.device,
-        )
-        self._roboduet_global_joint_ids = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
 
     def process_actions(self, actions: torch.Tensor):
         # Store the effective action after any curriculum mask, so observations/rewards see executed deltas.
@@ -353,6 +368,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             if current_iteration < float(self.cfg.fixed_delta_action_until_iteration):
                 effective_actions = actions.clone()
                 effective_actions[:, self._fixed_delta_action_joint_ids] = float(self.cfg.fixed_delta_action_value)
+
         prev_effective_action = getattr(self._env, "_go2arm_effective_action", None)
         prev_prev_effective_action = getattr(self._env, "_go2arm_prev_effective_action", None)
         if prev_effective_action is None:
@@ -362,30 +378,49 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         self._env._go2arm_prev_prev_effective_action = prev_prev_effective_action.clone()
         self._env._go2arm_prev_effective_action = prev_effective_action.clone()
         self._env._go2arm_effective_action = effective_actions.detach().clone()
+
         self._raw_actions[:] = effective_actions
         delta_actions = self._raw_actions * self._action_scale
         if self._hip_scale_joint_ids is not None:
             delta_actions = delta_actions.clone()
             delta_actions[:, self._hip_scale_joint_ids] *= float(self.cfg.hip_scale_reduction)
         if self._delta_clip is not None:
-            # 这里 clip 的是“相对默认姿态的关节偏移量”，不是最终绝对关节目标。
             delta_actions = torch.clamp(delta_actions, min=self._delta_clip[:, :, 0], max=self._delta_clip[:, :, 1])
-        # 最终目标保持为：default_joint_pos + delta_action，不再额外乘一个 scale。
-        self._processed_actions = delta_actions + self._offset
+
+        position_target = delta_actions + self._offset
+        self._leg_position_target = position_target[:, self._leg_action_ids]
+        self._arm_position_target = position_target[:, self._arm_action_ids]
+
         motor_offsets = getattr(self._env, "_roboduet_motor_offsets", None)
-        if motor_offsets is not None:
-            self._processed_actions = self._processed_actions + motor_offsets[:, self._roboduet_global_joint_ids]
         motor_strengths = getattr(self._env, "_roboduet_motor_strengths", None)
-        if motor_strengths is not None and self._arm_strength_joint_ids.numel() > 0:
-            arm_global_ids = self._roboduet_global_joint_ids[self._arm_strength_joint_ids]
-            self._processed_actions[:, self._arm_strength_joint_ids] *= motor_strengths[:, arm_global_ids]
+        if motor_offsets is None:
+            self._leg_motor_offsets = torch.zeros_like(self._leg_position_target)
+        else:
+            self._leg_motor_offsets = motor_offsets[:, self._leg_joint_ids]
+            self._arm_position_target = self._arm_position_target + motor_offsets[:, self._arm_joint_ids]
+        if motor_strengths is None:
+            self._leg_motor_strengths = torch.ones_like(self._leg_position_target)
+        else:
+            self._leg_motor_strengths = motor_strengths[:, self._leg_joint_ids]
+            self._arm_position_target = self._arm_position_target * motor_strengths[:, self._arm_joint_ids]
+
+        self._processed_actions = position_target
+        self._processed_actions[:, self._arm_action_ids] = self._arm_position_target
         self._env._go2arm_joint_pos_target = self._processed_actions.detach().clone()
-        target_global = torch.zeros_like(self._asset.data.default_joint_pos)
-        delta_global = torch.zeros_like(self._asset.data.default_joint_pos)
-        target_global[:, self._roboduet_global_joint_ids] = self._processed_actions
-        delta_global[:, self._roboduet_global_joint_ids] = delta_actions
-        self._env._go2arm_joint_pos_target_global = target_global.detach().clone()
-        self._env._go2arm_delta_action_global = delta_global.detach().clone()
+
+    def apply_actions(self):
+        leg_pos = self._asset.data.joint_pos[:, self._leg_joint_ids]
+        leg_vel = self._asset.data.joint_vel[:, self._leg_joint_ids]
+        leg_torque = self._leg_kp * (self._leg_position_target - leg_pos + self._leg_motor_offsets) - self._leg_kd * leg_vel
+        leg_torque = leg_torque * self._leg_motor_strengths
+        leg_effort_limits = self._asset.data.joint_effort_limits[:, self._leg_joint_ids]
+        leg_torque = torch.clamp(leg_torque, min=-leg_effort_limits, max=leg_effort_limits)
+        self._asset.set_joint_effort_target(leg_torque, joint_ids=self._leg_joint_ids_list)
+        self._asset.set_joint_position_target(self._arm_position_target, joint_ids=self._arm_joint_ids_list)
+
+        leg_torque_global = torch.zeros_like(self._asset.data.default_joint_pos)
+        leg_torque_global[:, self._leg_joint_ids] = leg_torque
+        self._env._go2arm_leg_torque_target = leg_torque_global.detach().clone()
 
     def reset(self, env_ids=None):
         super().reset(env_ids)
@@ -396,10 +431,9 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             "_go2arm_prev_effective_action",
             "_go2arm_prev_prev_effective_action",
             "_go2arm_joint_pos_target",
-            "_go2arm_joint_pos_target_global",
-            "_go2arm_delta_action_global",
             "_go2arm_last_joint_pos_target",
             "_go2arm_last_last_joint_pos_target",
+            "_go2arm_leg_torque_target",
         ):
             value = getattr(self._env, attr_name, None)
             if value is not None:
@@ -408,7 +442,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
 
 @configclass
 class Go2ArmDefaultDeltaJointPositionActionCfg(mdp.JointPositionActionCfg):
-    """go2arm 默认姿态中心关节偏移动作配置。"""
+    """go2arm RoboDuet 混合控制动作配置：腿部力矩、机械臂位置。"""
 
     class_type: type[ActionTerm] = Go2ArmDefaultDeltaJointPositionAction
     # 对“关节偏移量”做 clip，而不是对最终绝对关节目标做 clip。
@@ -416,6 +450,8 @@ class Go2ArmDefaultDeltaJointPositionActionCfg(mdp.JointPositionActionCfg):
     action_scale: float = 1.0
     hip_joint_names: list[str] | None = ["^(FL|FR|RL|RR)_hip_joint$"]
     hip_scale_reduction: float = 1.0
+    leg_stiffness: float = 40.0
+    leg_damping: float = 1.0
     fixed_delta_action_joint_names: list[str] | None = None
     fixed_delta_action_until_iteration: int | None = None
     fixed_delta_action_steps_per_iteration: int = 24

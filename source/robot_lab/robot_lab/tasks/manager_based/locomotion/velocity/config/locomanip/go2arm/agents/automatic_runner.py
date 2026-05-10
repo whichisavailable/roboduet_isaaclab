@@ -349,19 +349,11 @@ class RoboDuetAutomaticRunner:
         self._align_debug_height_min = float("inf")
         self._align_debug_term_done_sums = {}
         self._align_debug_leg_control_steps = 0
-        self._align_debug_leg_delta_abs_mean_sum = 0.0
-        self._align_debug_leg_pos_error_abs_mean_sum = 0.0
-        self._align_debug_leg_vel_abs_mean_sum = 0.0
-        self._align_debug_leg_manual_pd_abs_mean_sum = 0.0
-        self._align_debug_leg_manual_pd_abs_max = 0.0
-        self._align_debug_leg_manual_pd_diff_abs_mean_sum = 0.0
+        self._align_debug_leg_torque_target_abs_mean_sum = 0.0
         self._align_debug_leg_computed_torque_abs_mean_sum = 0.0
         self._align_debug_leg_applied_torque_abs_mean_sum = 0.0
+        self._align_debug_leg_torque_target_diff_abs_mean_sum = 0.0
         self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
-        self._align_debug_leg_target_cache_diff_abs_mean_sum = 0.0
-        self._align_debug_leg_target_cache_diff_abs_max = 0.0
-        self._align_debug_leg_kp_mean_sum = 0.0
-        self._align_debug_leg_kd_mean_sum = 0.0
         self._align_debug_action_clip_steps = 0
         self._align_debug_dog_raw_action_abs_mean_sum = 0.0
         self._align_debug_dog_raw_action_abs_max = 0.0
@@ -400,72 +392,18 @@ class RoboDuetAutomaticRunner:
         self._align_debug_height_min = min(self._align_debug_height_min, float(base_height.min().item()))
 
         leg_joint_ids = getattr(raw_env, "_go2arm_leg_joint_ids", None)
-        joint_pos_target = getattr(raw_env, "_go2arm_joint_pos_target_global", None)
-        delta_action = getattr(raw_env, "_go2arm_delta_action_global", None)
+        leg_torque_target_global = getattr(raw_env, "_go2arm_leg_torque_target", None)
         active_envs = ~dones
-        if (
-            leg_joint_ids is not None
-            and joint_pos_target is not None
-            and delta_action is not None
-            and torch.any(active_envs)
-        ):
+        if leg_joint_ids is not None and leg_torque_target_global is not None and torch.any(active_envs):
             leg_joint_ids_tensor = torch.as_tensor(leg_joint_ids, dtype=torch.long, device=raw_env.device)
-            leg_target_cached_all = joint_pos_target[:, leg_joint_ids_tensor]
-            if hasattr(robot.data, "joint_pos_target"):
-                leg_target_all = robot.data.joint_pos_target[:, leg_joint_ids_tensor]
-            else:
-                leg_target_all = leg_target_cached_all
-            if hasattr(robot.data, "joint_vel_target"):
-                leg_vel_target_all = robot.data.joint_vel_target[:, leg_joint_ids_tensor]
-            else:
-                leg_vel_target_all = torch.zeros_like(leg_target_all)
-            leg_target = leg_target_all[active_envs]
-            leg_target_cached = leg_target_cached_all[active_envs]
-            leg_vel_target = leg_vel_target_all[active_envs]
-            leg_delta = delta_action[:, leg_joint_ids_tensor][active_envs]
-            leg_joint_pos = robot.data.joint_pos[:, leg_joint_ids_tensor][active_envs]
-            leg_joint_vel = robot.data.joint_vel[:, leg_joint_ids_tensor][active_envs]
-            leg_pos_error = leg_target - leg_joint_pos
-            leg_vel_error = leg_vel_target - leg_joint_vel
-            leg_manual_pd = torch.zeros_like(leg_pos_error)
-            leg_kp_values = []
-            leg_kd_values = []
-            for actuator in robot.actuators.values():
-                joint_indices = actuator.joint_indices
-                if isinstance(joint_indices, slice):
-                    joint_indices = range(*joint_indices.indices(robot.num_joints))
-                for local_id, global_joint_id in enumerate(joint_indices):
-                    matching = leg_joint_ids_tensor == int(global_joint_id)
-                    if torch.any(matching):
-                        target_col = torch.where(matching)[0].item()
-                        leg_kp = actuator.stiffness[:, local_id][active_envs]
-                        leg_kd = actuator.damping[:, local_id][active_envs]
-                        leg_manual_pd[:, target_col] = (
-                            leg_kp * leg_pos_error[:, target_col] + leg_kd * leg_vel_error[:, target_col]
-                        )
-                        leg_kp_values.append(leg_kp)
-                        leg_kd_values.append(leg_kd)
+            leg_torque_target = leg_torque_target_global[:, leg_joint_ids_tensor][active_envs]
             self._align_debug_leg_control_steps += 1
-            self._align_debug_leg_delta_abs_mean_sum += float(leg_delta.abs().mean().item())
-            self._align_debug_leg_pos_error_abs_mean_sum += float(leg_pos_error.abs().mean().item())
-            self._align_debug_leg_vel_abs_mean_sum += float(leg_joint_vel.abs().mean().item())
-            self._align_debug_leg_manual_pd_abs_mean_sum += float(leg_manual_pd.abs().mean().item())
-            self._align_debug_leg_manual_pd_abs_max = max(
-                self._align_debug_leg_manual_pd_abs_max, float(leg_manual_pd.abs().max().item())
-            )
-            target_cache_diff = (leg_target_cached - leg_target).abs()
-            self._align_debug_leg_target_cache_diff_abs_mean_sum += float(target_cache_diff.mean().item())
-            self._align_debug_leg_target_cache_diff_abs_max = max(
-                self._align_debug_leg_target_cache_diff_abs_max, float(target_cache_diff.max().item())
-            )
-            if leg_kp_values:
-                self._align_debug_leg_kp_mean_sum += float(torch.stack(leg_kp_values, dim=-1).mean().item())
-                self._align_debug_leg_kd_mean_sum += float(torch.stack(leg_kd_values, dim=-1).mean().item())
+            self._align_debug_leg_torque_target_abs_mean_sum += float(leg_torque_target.abs().mean().item())
             if hasattr(robot.data, "computed_torque"):
                 leg_computed_torque = robot.data.computed_torque[:, leg_joint_ids_tensor][active_envs]
                 self._align_debug_leg_computed_torque_abs_mean_sum += float(leg_computed_torque.abs().mean().item())
-                self._align_debug_leg_manual_pd_diff_abs_mean_sum += float(
-                    (leg_manual_pd - leg_computed_torque).abs().mean().item()
+                self._align_debug_leg_torque_target_diff_abs_mean_sum += float(
+                    (leg_torque_target - leg_computed_torque).abs().mean().item()
                 )
             if hasattr(robot.data, "applied_torque"):
                 leg_applied_torque = robot.data.applied_torque[:, leg_joint_ids_tensor][active_envs]
@@ -502,16 +440,9 @@ class RoboDuetAutomaticRunner:
             f"it={it} ep_len={mean_episode_length:.6g} "
             f"term={terminal_rate_on_done:.3g} timeout={timeout_rate_on_done:.3g} "
             f"h_mean={self._align_debug_height_mean_sum / steps:.6g} h_min={self._align_debug_height_min:.6g} "
-            f"leg_delta={self._align_debug_leg_delta_abs_mean_sum / leg_steps:.6g} "
-            f"leg_err={self._align_debug_leg_pos_error_abs_mean_sum / leg_steps:.6g} "
-            f"leg_vel={self._align_debug_leg_vel_abs_mean_sum / leg_steps:.6g} "
-            f"pd_manual={self._align_debug_leg_manual_pd_abs_mean_sum / leg_steps:.6g} "
-            f"pd_isaac={self._align_debug_leg_computed_torque_abs_mean_sum / leg_steps:.6g} "
-            f"pd_diff={self._align_debug_leg_manual_pd_diff_abs_mean_sum / leg_steps:.6g} "
-            f"tgt_diff={self._align_debug_leg_target_cache_diff_abs_mean_sum / leg_steps:.6g} "
-            f"tgt_diff_max={self._align_debug_leg_target_cache_diff_abs_max:.6g} "
-            f"kp={self._align_debug_leg_kp_mean_sum / leg_steps:.6g} "
-            f"kd={self._align_debug_leg_kd_mean_sum / leg_steps:.6g} "
+            f"leg_tau={self._align_debug_leg_torque_target_abs_mean_sum / leg_steps:.6g} "
+            f"tau_isaac={self._align_debug_leg_computed_torque_abs_mean_sum / leg_steps:.6g} "
+            f"tau_diff={self._align_debug_leg_torque_target_diff_abs_mean_sum / leg_steps:.6g} "
             f"tau_applied={self._align_debug_leg_applied_torque_abs_mean_sum / leg_steps:.6g} "
             f"tau_clip={self._align_debug_leg_torque_clip_abs_mean_sum / leg_steps:.6g} "
             f"raw_act={self._align_debug_dog_raw_action_abs_mean_sum / action_clip_steps:.6g} "
