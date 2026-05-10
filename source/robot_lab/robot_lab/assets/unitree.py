@@ -47,13 +47,12 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
             "F.*_thigh_joint": 0.8,
             "R.*_thigh_joint": 1.0,
             ".*_calf_joint": -1.5,
-            # Piper arm joints (joint1..joint6)
-            # Avoid initializing at one-sided joint limits (joint2: [0, pi], joint3: [-2.967, 0]),
-            # otherwise reset randomization can clamp them at 0 and the arm gets stuck early in training.
-            # Keep the arm reasonably tucked to reduce early falls / illegal_contact terminations.
+            # Piper arm joints (joint1..joint6).  Keep these aligned with upstream
+            # `roboduet_go2piper/go1_gym/envs/go1/asset_config.py` defaults for
+            # piper_joint1..piper_joint6 used by `scripts/auto_train.py` stage1.
             "joint1": 0.0,
-            "joint2": 0.314,
-            "joint3": -0.2967,
+            "joint2": 0.6,
+            "joint3": -0.5,
             "joint4": 0.0,
             "joint5": 0.0,
             "joint6": 0.0,
@@ -88,8 +87,25 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
             joint_names_expr=[r"joint[1-6]"],
             effort_limit=50,
             velocity_limit=28,
-            stiffness=30.0,
-            damping=1.0,
+            # Match upstream RoboDuet Piper PD gains from `asset_config.py`:
+            # piper_joint1..6 stiffness = [40, 80, 80, 40, 80, 40],
+            # damping = [3, 6, 6, 3, 6, 3].
+            stiffness={
+                "joint1": 40.0,
+                "joint2": 80.0,
+                "joint3": 80.0,
+                "joint4": 40.0,
+                "joint5": 80.0,
+                "joint6": 40.0,
+            },
+            damping={
+                "joint1": 3.0,
+                "joint2": 6.0,
+                "joint3": 6.0,
+                "joint4": 3.0,
+                "joint5": 6.0,
+                "joint6": 3.0,
+            },
             friction=0.0,
             # armature=0.01,
             # min_delay=0,

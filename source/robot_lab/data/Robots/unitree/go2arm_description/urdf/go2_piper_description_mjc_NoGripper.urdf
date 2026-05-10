@@ -58,7 +58,8 @@ Stephen Brawner (brawner@gmail.com)
   </link>
   
   <joint name="base_mount_joint" type="fixed">
-    <origin xyz="0.10 0 0.072" rpy="0 0 0"/>
+    <!-- Align Piper mounting pose with upstream roboduet_go2piper/resources/robots/go2_piper/go2/urdf/go2piper.urdf:piper_mount. -->
+    <origin xyz="-0.01 0 0.085" rpy="0 0 0"/>
     <parent link="base"/>
     <child link="arm_mount"/>
   </joint>
@@ -93,7 +94,8 @@ Stephen Brawner (brawner@gmail.com)
   </link>
 
   <joint name="arm_mount_joint" type="fixed">
-    <origin xyz="0 0 0.015" rpy="0 0 0"/> <!-- 在parent里的位置 -->
+    <!-- Keep the local adapter link, but do not add an extra z offset beyond upstream piper_mount. -->
+    <origin xyz="0 0 0" rpy="0 0 0"/> <!-- 在parent里的位置 -->
     <parent link="arm_mount"/>
     <child link="base_link"/>
   </joint>

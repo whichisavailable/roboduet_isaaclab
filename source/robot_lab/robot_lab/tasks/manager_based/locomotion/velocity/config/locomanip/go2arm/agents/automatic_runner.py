@@ -342,17 +342,51 @@ class RoboDuetAutomaticRunner:
         self.cur_arm_reward_sum[new_ids] = 0
 
     def _log_roboduet_scalars(self, it: int) -> None:
-        if self.logger.writer is None:
-            return
-        self.logger.writer.add_scalar("RoboDuet/switch_open", float(self._command_term().switch_open), it)
-        self.logger.writer.add_scalar("Policy/dog_mean_std", self.dog_model.std.mean().item(), it)
-        self.logger.writer.add_scalar("Policy/arm_mean_std", self.arm_model.std.mean().item(), it)
-        if len(self.arm_rewbuffer) > 0:
-            self.logger.writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
-            if getattr(self.logger, "logger_type", "tensorboard") != "wandb":
-                self.logger.writer.add_scalar(
-                    "Train/mean_arm_reward/time", statistics.mean(self.arm_rewbuffer), int(self.logger.tot_time)
-                )
+        command_term = self._command_term()
+        raw_env = self.env.unwrapped
+        switch_open = bool(command_term.switch_open)
+        arm_obs_abs_max = command_term.commands_arm_obs.abs().max().item()
+        cmd_pitch_roll_abs_mean = command_term.commands_dog[:, 3:5].abs().mean().item()
+        cmd_velocity_abs_mean = command_term.commands_dog[:, :3].abs().mean().item()
+        effective_leg_action_abs_mean = float("nan")
+        effective_arm_action_abs_mean = float("nan")
+        effective_arm_action_abs_max = float("nan")
+        if hasattr(raw_env, "_go2arm_effective_action"):
+            effective_action = raw_env._go2arm_effective_action
+            effective_leg_action_abs_mean = effective_action[:, : self.dog_action_dim].abs().mean().item()
+            effective_arm_action_abs_mean = effective_action[:, self.dog_action_dim :].abs().mean().item()
+            effective_arm_action_abs_max = effective_action[:, self.dog_action_dim :].abs().max().item()
+
+        writer = self.logger.writer
+        if writer is not None:
+            writer.add_scalar("RoboDuet/switch_open", float(switch_open), it)
+            writer.add_scalar("Policy/dog_mean_std", self.dog_model.std.mean().item(), it)
+            writer.add_scalar("Policy/arm_mean_std", self.arm_model.std.mean().item(), it)
+            writer.add_scalar("RoboDuet/stage1_arm_effective_action_abs_max", effective_arm_action_abs_max, it)
+            writer.add_scalar("RoboDuet/stage1_arm_obs_abs_max", arm_obs_abs_max, it)
+            writer.add_scalar("RoboDuet/effective_leg_action_abs_mean", effective_leg_action_abs_mean, it)
+            writer.add_scalar("RoboDuet/effective_arm_action_abs_mean", effective_arm_action_abs_mean, it)
+            writer.add_scalar("RoboDuet/effective_arm_action_abs_max", effective_arm_action_abs_max, it)
+            writer.add_scalar("RoboDuet/stage1_command_pitch_roll_abs_mean", cmd_pitch_roll_abs_mean, it)
+            writer.add_scalar("RoboDuet/stage1_command_velocity_abs_mean", cmd_velocity_abs_mean, it)
+            if len(self.arm_rewbuffer) > 0:
+                writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
+                if getattr(self.logger, "logger_type", "tensorboard") != "wandb":
+                    writer.add_scalar(
+                        "Train/mean_arm_reward/time", statistics.mean(self.arm_rewbuffer), int(self.logger.tot_time)
+                    )
+
+        print(
+            "[roboduet-stage-debug] "
+            f"it={it} switch_open={int(switch_open)} "
+            f"arm_eff_mean={effective_arm_action_abs_mean:.6g} "
+            f"arm_eff_max={effective_arm_action_abs_max:.6g} "
+            f"arm_obs_max={arm_obs_abs_max:.6g} "
+            f"cmd_pitch_roll_mean={cmd_pitch_roll_abs_mean:.6g} "
+            f"cmd_vel_mean={cmd_velocity_abs_mean:.6g} "
+            f"dog_eff_mean={effective_leg_action_abs_mean:.6g}",
+            flush=True,
+        )
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if init_at_random_ep_len:
