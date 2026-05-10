@@ -844,10 +844,11 @@ class RoboDuetCommandCfg(CommandTermCfg):
     num_bins_body_pitch: int = 1
     num_bins_body_roll: int = 1
     curriculum_thresholds: dict[str, float] = {
+        # Match `roboduet_go2piper` auto_train robot=go2 after `config_wtw()` overrides.
         "tracking_lin_vel": 0.8,
-        "tracking_ang_vel": 0.5,
-        "tracking_contacts_shaped_force": 0.8,
-        "tracking_contacts_shaped_vel": 0.8,
+        "tracking_ang_vel": 0.7,
+        "tracking_contacts_shaped_force": 0.9,
+        "tracking_contacts_shaped_vel": 0.9,
     }
     pretrained_reward_scales: dict[str, float] = {
         "tracking_lin_vel": 1.0,
@@ -1029,7 +1030,8 @@ class RoboDuetCommand(CommandTerm):
                 self.command_sums[key][env_ids] = 0.0
             return
         if allow_curriculum_update:
-            reward_dt = float(self._env.step_dt)
+            # `command_sums` already accumulates reward terms scaled by env.step_dt,
+            # mirroring upstream RoboDuet where reward scales are multiplied by dt during reward setup.
             ep_len = max(
                 1.0,
                 min(float(self._env.max_episode_length), float(round(self.cfg.resampling_time_s / self._env.step_dt))),
@@ -1041,9 +1043,7 @@ class RoboDuetCommand(CommandTerm):
                 if key not in self.command_sums:
                     continue
                 task_rewards.append(self.command_sums[key][env_ids] / ep_len)
-                success_thresholds.append(
-                    self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key] * reward_dt
-                )
+                success_thresholds.append(self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key])
             self._curriculum.update(
                 old_bins,
                 task_rewards,
