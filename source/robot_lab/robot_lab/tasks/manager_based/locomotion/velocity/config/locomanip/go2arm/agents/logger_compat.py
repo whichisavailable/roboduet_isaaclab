@@ -200,7 +200,8 @@ class Logger:
                 )
 
         log_string = f"""{"#" * width}\n"""
-        log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
+        display_it = it + 1
+        log_string += f"""\033[1m{f" Learning iteration {display_it}/{total_it} ".center(width)}\033[0m \n\n"""
         run_name = self.cfg.get("run_name")
         log_string += f"""\033[1m{"run_name:":>{pad}} {run_name}\033[0m \n""" if run_name else ""
         log_string += (
