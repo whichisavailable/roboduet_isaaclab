@@ -313,9 +313,96 @@ class RoboDuetAutomaticRunner:
         full_action = torch.cat((dog_actions, arm_actions), dim=-1)
         obs, _rew, dones, extras = self.env.step(full_action)
         raw_env = self.env.unwrapped
+        self._record_alignment_debug_step(dones)
         rewards_dog = getattr(raw_env, "_roboduet_reward_dog").to(self.device)
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
         return obs, rewards_dog, rewards_arm, dones.to(self.device), extras
+
+    def _reset_alignment_debug_accumulators(self) -> None:
+        self._align_debug_steps = 0
+        self._align_debug_done_count = 0.0
+        self._align_debug_terminated_count = 0.0
+        self._align_debug_timeout_count = 0.0
+        self._align_debug_height_mean_sum = 0.0
+        self._align_debug_height_min = float("inf")
+        self._align_debug_roll_abs_mean_sum = 0.0
+        self._align_debug_roll_abs_max = 0.0
+        self._align_debug_pitch_abs_mean_sum = 0.0
+        self._align_debug_pitch_abs_max = 0.0
+        self._align_debug_term_done_sums = {}
+
+    def _record_alignment_debug_step(self, dones: torch.Tensor) -> None:
+        if not hasattr(self, "_align_debug_steps"):
+            self._reset_alignment_debug_accumulators()
+
+        raw_env = self.env.unwrapped
+        dones = dones.detach().to(device=raw_env.device, dtype=torch.bool)
+        done_count = float(dones.sum().item())
+        self._align_debug_steps += 1
+        self._align_debug_done_count += done_count
+
+        terminated = getattr(raw_env, "reset_terminated", None)
+        if terminated is not None:
+            terminated = terminated.detach().to(device=raw_env.device, dtype=torch.bool)
+            self._align_debug_terminated_count += float((terminated & dones).sum().item())
+        timeouts = getattr(raw_env, "reset_time_outs", None)
+        if timeouts is not None:
+            timeouts = timeouts.detach().to(device=raw_env.device, dtype=torch.bool)
+            self._align_debug_timeout_count += float((timeouts & dones).sum().item())
+
+        termination_manager = getattr(raw_env, "termination_manager", None)
+        if termination_manager is not None and done_count > 0.0:
+            for term_name in termination_manager.active_terms:
+                term_value = termination_manager.get_term(term_name).detach().to(device=raw_env.device, dtype=torch.bool)
+                self._align_debug_term_done_sums[term_name] = self._align_debug_term_done_sums.get(term_name, 0.0) + float(
+                    (term_value & dones).sum().item()
+                )
+
+        robot = raw_env.scene["robot"]
+        base_height = robot.data.root_pos_w[:, 2]
+        gravity_b = robot.data.projected_gravity_b
+        roll = torch.atan2(gravity_b[:, 1], -gravity_b[:, 2])
+        pitch = torch.atan2(-gravity_b[:, 0], torch.sqrt(gravity_b[:, 1] ** 2 + gravity_b[:, 2] ** 2))
+        self._align_debug_height_mean_sum += float(base_height.mean().item())
+        self._align_debug_height_min = min(self._align_debug_height_min, float(base_height.min().item()))
+        self._align_debug_roll_abs_mean_sum += float(roll.abs().mean().item())
+        self._align_debug_roll_abs_max = max(self._align_debug_roll_abs_max, float(roll.abs().max().item()))
+        self._align_debug_pitch_abs_mean_sum += float(pitch.abs().mean().item())
+        self._align_debug_pitch_abs_max = max(self._align_debug_pitch_abs_max, float(pitch.abs().max().item()))
+
+    def _print_alignment_debug(self, it: int) -> None:
+        if not hasattr(self, "_align_debug_steps") or self._align_debug_steps == 0:
+            return
+
+        steps = float(self._align_debug_steps)
+        num_envs = float(self.env.num_envs)
+        done_rate = self._align_debug_done_count / max(steps * num_envs, 1.0)
+        terminal_rate_on_done = self._align_debug_terminated_count / max(self._align_debug_done_count, 1.0)
+        timeout_rate_on_done = self._align_debug_timeout_count / max(self._align_debug_done_count, 1.0)
+        mean_episode_length = statistics.mean(self.logger.lenbuffer) if len(self.logger.lenbuffer) > 0 else float("nan")
+        term_on_done = ",".join(
+            f"{name}:{count / max(self._align_debug_done_count, 1.0):.3g}"
+            for name, count in sorted(self._align_debug_term_done_sums.items())
+        )
+        if not term_on_done:
+            term_on_done = "none"
+
+        print(
+            "[roboduet-align-debug] "
+            f"it={it} mean_ep_len={mean_episode_length:.6g} "
+            f"rollout_done_envs={self._align_debug_done_count:.0f} "
+            f"done_rate={done_rate:.6g} "
+            f"terminated_on_done={terminal_rate_on_done:.6g} "
+            f"timeout_on_done={timeout_rate_on_done:.6g} "
+            f"base_h_mean={self._align_debug_height_mean_sum / steps:.6g} "
+            f"base_h_min={self._align_debug_height_min:.6g} "
+            f"roll_abs_mean={self._align_debug_roll_abs_mean_sum / steps:.6g} "
+            f"roll_abs_max={self._align_debug_roll_abs_max:.6g} "
+            f"pitch_abs_mean={self._align_debug_pitch_abs_mean_sum / steps:.6g} "
+            f"pitch_abs_max={self._align_debug_pitch_abs_max:.6g} "
+            f"term_on_done={term_on_done}",
+            flush=True,
+        )
 
     @staticmethod
     def _make_loss_dict(prefix: str, loss_tuple) -> dict[str, float]:
@@ -387,6 +474,7 @@ class RoboDuetAutomaticRunner:
             f"dog_eff_mean={effective_leg_action_abs_mean:.6g}",
             flush=True,
         )
+        self._print_alignment_debug(it)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if init_at_random_ep_len:
@@ -413,6 +501,7 @@ class RoboDuetAutomaticRunner:
             elif dog_obs_dict is None:
                 dog_obs_dict = self._get_dog_observations()
 
+            self._reset_alignment_debug_accumulators()
             rollout_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):
