@@ -18,6 +18,9 @@ from isaaclab.app import AppLauncher
 # local imports
 import cli_args  # isort: skip
 
+_GO2ARM_PLAY_FIXED_COMMAND_TIME_S = 1.0e9
+_GO2ARM_PLAY_STAGE1_ONLY_SWITCH_ITERATION = 1_000_000_000
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -59,6 +62,14 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Print Go2Arm action and joint state diagnostics during play.",
+)
+parser.add_argument(
+    "--go2arm_dog_cmd",
+    type=float,
+    nargs=3,
+    metavar=("VX", "VY", "WZ"),
+    default=None,
+    help="Fixed RoboDuet dog command for Go2Arm play: vx, vy, yaw-rate. Randomly sampled once if omitted.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -173,6 +184,59 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int) -> N
         f"arm_joint_delta={[round(float(x), 3) for x in arm_joint_delta.tolist()]} "
         f"arm_joint_pos={[round(float(x), 3) for x in arm_joint_pos.tolist()]}"
     )
+ 
+ 
+def _sample_go2arm_dog_command_once(roboduet_cfg) -> tuple[float, float, float]:
+    """Sample one non-zero dog velocity command from the configured RoboDuet ranges."""
+    ranges = (roboduet_cfg.lin_vel_x, roboduet_cfg.lin_vel_y, roboduet_cfg.ang_vel_yaw)
+    for _ in range(100):
+        command = tuple(
+            float(torch.empty((), dtype=torch.float32).uniform_(float(cmd_range[0]), float(cmd_range[1])).item())
+            for cmd_range in ranges
+        )
+        if abs(command[0]) > 0.07 or abs(command[1]) > 0.07 or abs(command[2]) > 0.10:
+            return command
+    return tuple(float((cmd_range[0] + cmd_range[1]) * 0.5) for cmd_range in ranges)
+
+
+def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
+    """Keep RoboDuet play in stage1 and use one fixed dog command for playback."""
+    roboduet_cfg = getattr(getattr(env_cfg, "commands", None), "roboduet", None)
+    if roboduet_cfg is None:
+        return False
+
+    if args_cli.go2arm_dog_cmd is None:
+        dog_cmd = _sample_go2arm_dog_command_once(roboduet_cfg)
+        dog_cmd_source = "sampled"
+    else:
+        dog_cmd = tuple(float(value) for value in args_cli.go2arm_dog_cmd)
+        dog_cmd_source = "cli"
+    fixed_time_s = float(_GO2ARM_PLAY_FIXED_COMMAND_TIME_S)
+    stage1_switch_iteration = int(_GO2ARM_PLAY_STAGE1_ONLY_SWITCH_ITERATION)
+
+    # Keep play in stage1 for dog-only validation: arm command observations stay
+    # zero, the RoboDuet inference policy emits zero arm actions, and the action
+    # term keeps joint1-6 deltas fixed.  The custom runner can overwrite env_cfg
+    # from agent_cfg during construction, so set both configs here.
+    roboduet_cfg.switch_iteration = stage1_switch_iteration
+    if hasattr(agent_cfg, "roboduet_disable_two_stage"):
+        agent_cfg.roboduet_disable_two_stage = False
+    if hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
+        agent_cfg.roboduet_stage_switch_iteration = stage1_switch_iteration
+    env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = stage1_switch_iteration
+
+    # Only freeze the dog command after one initial sample/CLI command.
+    roboduet_cfg.fixed_play_dog_command = dog_cmd
+    roboduet_cfg.disable_play_resampling = True
+    roboduet_cfg.resampling_time_s = fixed_time_s
+    roboduet_cfg.resampling_time_range = (fixed_time_s, fixed_time_s)
+
+    print(
+        "[INFO] Go2Arm RoboDuet stage1 dog play command: "
+        f"source={dog_cmd_source}, dog(vx,vy,wz)={dog_cmd}, "
+        f"resampling_time_s={fixed_time_s:g}, switch_iteration={stage1_switch_iteration}."
+    )
+    return True
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -207,11 +271,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.events.randomize_apply_external_force_torque_ee = None
         env_cfg.events.randomize_push_robot = None
         env_cfg.enable_play_termination_reason_logging = True
-        # Play starts a fresh environment counter at 0, so the training-time fixed arm freeze
-        # would otherwise be active again for many steps. Disable it here to observe the
-        # policy's real arm output during play.
-        env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = 0
-        print("[INFO] Go2Arm play override: disabled fixed arm-action freeze for playback.")
+        # Keep arm disabled for stage1 dog-only playback.  The action term keeps
+        # joint1-6 deltas fixed for the duration of playback.
+        fixed_roboduet_play = _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg)
+        print("[INFO] Go2Arm play override: kept stage1 arm-action freeze for dog-only playback.")
+        if fixed_roboduet_play:
+            print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time command resampling.")
     else:
         if env_cfg.observations.policy is not None:
             env_cfg.observations.policy.enable_corruption = False

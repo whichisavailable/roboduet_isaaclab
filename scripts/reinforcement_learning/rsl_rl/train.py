@@ -41,6 +41,12 @@ parser.add_argument(
     default=False,
     help="Create the RoboDuet environment and check key effective training semantics, then exit without training.",
 )
+parser.add_argument(
+    "--roboduet_debug_stage_switch_iteration",
+    type=int,
+    default=None,
+    help="Debug-only override for RoboDuet stage switch iteration. Leaves config defaults unchanged when unset.",
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -412,6 +418,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.roboduet_debug_stage_switch_iteration is not None:
+        if not hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
+            raise ValueError(
+                "--roboduet_debug_stage_switch_iteration is only valid for RoboDuet automatic runner configs."
+            )
+        agent_cfg.roboduet_stage_switch_iteration = int(args_cli.roboduet_debug_stage_switch_iteration)
+        print(
+            "[INFO] RoboDuet debug override: "
+            f"roboduet_stage_switch_iteration={agent_cfg.roboduet_stage_switch_iteration}"
+        )
     if int(agent_cfg.seed) == -1:
         agent_cfg.seed = int(torch.randint(0, 10000, (1,)).item())
         print(f"[INFO] RoboDuet random seed selected: {agent_cfg.seed}")

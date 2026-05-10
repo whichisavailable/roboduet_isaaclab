@@ -866,7 +866,11 @@ class RoboDuetCommandCfg(CommandTermCfg):
     gait_duration: float = 0.5
     gait_kappa: float = 0.07
     commands_scale_dog: tuple[float, float, float, float, float] = (2.0, 2.0, 0.25, 1.0, 1.0)
-
+    # Play-time overrides.  When set by play.py, reset/update keep the dog command
+    # fixed instead of using the training-time curriculum and random command resampling.
+    fixed_play_dog_command: tuple[float, float, float] | None = None
+    disable_play_resampling: bool = False
+ 
     def __post_init__(self):
         self.class_type = RoboDuetCommand
         self.resampling_time_range = (self.resampling_time_s, self.resampling_time_s)
@@ -949,6 +953,7 @@ class RoboDuetCommand(CommandTerm):
         if self.switch_open:
             self._resample_arm_commands(env_ids_tensor)
         self._step_contact_targets()
+        self._refresh_command_buffer()
         return extras
 
     def _update_metrics(self):
@@ -957,7 +962,32 @@ class RoboDuetCommand(CommandTerm):
     def accumulate_metric(self, name: str, values: torch.Tensor) -> None:
         if name in self.command_sums:
             self.command_sums[name] += values.detach()
-
+ 
+    def _apply_fixed_play_locomotion_commands(self, env_ids: torch.Tensor) -> bool:
+        fixed_command = self.cfg.fixed_play_dog_command
+        if fixed_command is None:
+            return False
+        if env_ids.numel() == 0:
+            return True
+        fixed_command_tensor = torch.tensor(fixed_command, device=self.device, dtype=torch.float32)
+        if fixed_command_tensor.numel() != 3:
+            raise ValueError(f"fixed_play_dog_command expects 3 values, got {fixed_command}.")
+        self.commands_dog[env_ids, :3] = fixed_command_tensor.unsqueeze(0).expand(env_ids.numel(), -1)
+        # Keep planner/body pitch-roll commands inactive during stage1 dog-only playback.
+        self.commands_dog[env_ids, 3:5] = 0.0
+        return True
+ 
+    def _refresh_command_buffer(self) -> None:
+        arm_command_obs = self.commands_arm_obs if self.switch_open else self._zero_arm_command_obs
+        self.command_buffer = torch.cat(
+            (
+                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
+                arm_command_obs,
+                self.clock_inputs,
+            ),
+            dim=-1,
+        )
+ 
     def _resample_command(self, env_ids: Sequence[int]):
         self._resample_locomotion_commands(torch.as_tensor(env_ids, dtype=torch.long, device=self.device))
 
@@ -973,55 +1003,30 @@ class RoboDuetCommand(CommandTerm):
 
     def _update_command(self):
         self._update_switch_state()
-        # locomotion 按固定时间间隔重采样；机械臂按各自轨迹时长重采样。
-        sample_interval = max(1, int(round(self.cfg.resampling_time_s / self._env.step_dt)))
-        env_ids = torch.where(
-            (self._env.episode_length_buf > 0) & (self._env.episode_length_buf % sample_interval == 0)
-        )[0]
-        if env_ids.numel() > 0:
-            self._resample_locomotion_commands(env_ids)
-        if self.switch_open:
-            self.arm_time += self._env.step_dt
-            env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
+        if self.cfg.disable_play_resampling:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            self._apply_fixed_play_locomotion_commands(env_ids)
+        else:
+            sample_interval = max(1, int(round(self.cfg.resampling_time_s / self._env.step_dt)))
+            env_ids = torch.where(
+                (self._env.episode_length_buf > 0) & (self._env.episode_length_buf % sample_interval == 0)
+            )[0]
             if env_ids.numel() > 0:
-                self._resample_arm_commands(env_ids)
+                self._resample_locomotion_commands(env_ids)
+            if self.switch_open:
+                self.arm_time += self._env.step_dt
+                env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
+                if env_ids.numel() > 0:
+                    self._resample_arm_commands(env_ids)
         self._step_contact_targets()
-        self.command_buffer = torch.cat(
-            (
-                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
-                # 第一阶段对 actor 暴露全零机械臂命令，保持与原版阶段切换语义一致。
-                torch.where(self.switch_open, self.commands_arm_obs, torch.zeros_like(self.commands_arm_obs)),
-                self.clock_inputs,
-            ),
-            dim=-1,
-        )
-
-    def _update_command(self):
-        self._update_switch_state()
-        sample_interval = max(1, int(round(self.cfg.resampling_time_s / self._env.step_dt)))
-        env_ids = torch.where(
-            (self._env.episode_length_buf > 0) & (self._env.episode_length_buf % sample_interval == 0)
-        )[0]
-        if env_ids.numel() > 0:
-            self._resample_locomotion_commands(env_ids)
-        if self.switch_open:
-            self.arm_time += self._env.step_dt
-            env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
-            if env_ids.numel() > 0:
-                self._resample_arm_commands(env_ids)
-        self._step_contact_targets()
-        arm_command_obs = self.commands_arm_obs if self.switch_open else self._zero_arm_command_obs
-        self.command_buffer = torch.cat(
-            (
-                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
-                arm_command_obs,
-                self.clock_inputs,
-            ),
-            dim=-1,
-        )
+        self._refresh_command_buffer()
 
     def _resample_locomotion_commands(self, env_ids: torch.Tensor, allow_curriculum_update: bool = True) -> None:
         if env_ids.numel() == 0:
+            return
+        if self._apply_fixed_play_locomotion_commands(env_ids):
+            for key in self.command_sums:
+                self.command_sums[key][env_ids] = 0.0
             return
         if allow_curriculum_update:
             reward_dt = float(self._env.step_dt)

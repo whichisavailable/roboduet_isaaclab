@@ -112,6 +112,7 @@ class RoboDuetAutomaticRunner:
         self.gpu_world_size = 1
         self.gpu_global_rank = 0
         self.is_distributed = False
+        self._stage_switch_debug_printed = False
 
         obs = self.env.get_observations()
         self.dog_obs_dim = int(obs["dog_policy"].shape[-1])
@@ -341,6 +342,50 @@ class RoboDuetAutomaticRunner:
         self.arm_rewbuffer.extend(self.cur_arm_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
         self.cur_arm_reward_sum[new_ids] = 0
 
+    def _log_stage_switch_transition_debug(
+        self,
+        *,
+        it: int,
+        rollout_step: int,
+        switch_open_before_step: bool,
+        switch_open_after_step: bool,
+        arm_act_called: bool,
+        extras: dict,
+    ) -> None:
+        if self._stage_switch_debug_printed and not (switch_open_after_step and not arm_act_called):
+            return
+        command_term = self._command_term()
+        common_step = int(getattr(self.env.unwrapped, "common_step_counter", -1))
+        steps_per_iteration = int(max(getattr(command_term.cfg, "steps_per_iteration", 1), 1))
+        current_iteration = float(common_step) / float(steps_per_iteration)
+        time_outs = extras.get("time_outs") if isinstance(extras, dict) else None
+        if isinstance(time_outs, torch.Tensor):
+            time_outs_summary = (
+                f"shape={tuple(time_outs.shape)}, dtype={time_outs.dtype}, "
+                f"sum={float(time_outs.float().sum().item())}"
+            )
+        else:
+            time_outs_summary = repr(time_outs)
+        arm_transition_values = self.alg_arm.transition.values
+        dog_transition_values = self.alg_dog.transition.values
+        print(
+            "[ROBODUET_STAGE_DEBUG] "
+            f"it={it}, rollout_step={rollout_step}, common_step={common_step}, "
+            f"current_iteration={current_iteration:.6f}, "
+            f"switch_iteration={int(command_term.cfg.switch_iteration)}, "
+            f"switch_open_before_step={switch_open_before_step}, "
+            f"switch_open_after_step={switch_open_after_step}, "
+            f"arm_act_called={arm_act_called}, "
+            f"arm_transition_values_is_none={arm_transition_values is None}, "
+            f"dog_transition_values_is_none={dog_transition_values is None}, "
+            f"arm_storage_step={self.alg_arm.storage.step}, "
+            f"dog_storage_step={self.alg_dog.storage.step}, "
+            f"time_outs={time_outs_summary}",
+            flush=True,
+        )
+        if switch_open_after_step != switch_open_before_step:
+            self._stage_switch_debug_printed = True
+
     def _log_roboduet_scalars(self, it: int) -> None:
         if self.logger.writer is None:
             return
@@ -377,12 +422,15 @@ class RoboDuetAutomaticRunner:
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):
                     command_term = self._command_term()
+                    switch_open_before_step = bool(command_term.switch_open)
+                    arm_act_called = False
                     if command_term.switch_open:
                         actions_arm_cd = self.alg_arm.act(
                             arm_obs_dict["obs"],
                             arm_obs_dict["privileged_obs"],
                             arm_obs_dict["obs_history"],
                         )
+                        arm_act_called = True
                         self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
                         arm_actions = actions_arm_cd[:, : self.arm_action_dim]
                         dog_obs_dict = self._get_dog_observations()
@@ -398,6 +446,18 @@ class RoboDuetAutomaticRunner:
                         dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
                     )
                     obs, rewards_dog, rewards_arm, dones, extras = self._step_env(actions_dog, arm_actions)
+                    switch_open_after_step = bool(self._command_term().switch_open)
+                    if switch_open_after_step != switch_open_before_step or (
+                        switch_open_after_step and not arm_act_called
+                    ):
+                        self._log_stage_switch_transition_debug(
+                            it=it,
+                            rollout_step=rollout_step,
+                            switch_open_before_step=switch_open_before_step,
+                            switch_open_after_step=switch_open_after_step,
+                            arm_act_called=arm_act_called,
+                            extras=extras,
+                        )
                     self.logger.process_env_step(rewards_dog, dones, extras)
                     self._process_arm_reward_step(rewards_arm, dones)
 
