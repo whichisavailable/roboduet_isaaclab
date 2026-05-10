@@ -330,6 +330,14 @@ class RoboDuetAutomaticRunner:
         self._align_debug_pitch_abs_mean_sum = 0.0
         self._align_debug_pitch_abs_max = 0.0
         self._align_debug_term_done_sums = {}
+        self._align_debug_leg_control_steps = 0
+        self._align_debug_leg_target_delta_abs_mean_sum = 0.0
+        self._align_debug_leg_pos_error_abs_mean_sum = 0.0
+        self._align_debug_leg_vel_abs_mean_sum = 0.0
+        self._align_debug_leg_applied_torque_abs_mean_sum = 0.0
+        self._align_debug_leg_applied_torque_abs_max = 0.0
+        self._align_debug_leg_computed_torque_abs_mean_sum = 0.0
+        self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
 
     def _record_alignment_debug_step(self, dones: torch.Tensor) -> None:
         if not hasattr(self, "_align_debug_steps"):
@@ -370,6 +378,34 @@ class RoboDuetAutomaticRunner:
         self._align_debug_pitch_abs_mean_sum += float(pitch.abs().mean().item())
         self._align_debug_pitch_abs_max = max(self._align_debug_pitch_abs_max, float(pitch.abs().max().item()))
 
+        leg_joint_ids = getattr(raw_env, "_go2arm_leg_joint_ids", None)
+        joint_pos_target = getattr(raw_env, "_go2arm_joint_pos_target", None)
+        if leg_joint_ids is not None and joint_pos_target is not None:
+            leg_joint_ids_tensor = torch.as_tensor(leg_joint_ids, dtype=torch.long, device=raw_env.device)
+            leg_target = joint_pos_target[:, leg_joint_ids_tensor]
+            leg_default_pos = robot.data.default_joint_pos[:, leg_joint_ids_tensor]
+            leg_joint_pos = robot.data.joint_pos[:, leg_joint_ids_tensor]
+            leg_joint_vel = robot.data.joint_vel[:, leg_joint_ids_tensor]
+            leg_target_delta = leg_target - leg_default_pos
+            leg_pos_error = leg_target - leg_joint_pos
+            self._align_debug_leg_control_steps += 1
+            self._align_debug_leg_target_delta_abs_mean_sum += float(leg_target_delta.abs().mean().item())
+            self._align_debug_leg_pos_error_abs_mean_sum += float(leg_pos_error.abs().mean().item())
+            self._align_debug_leg_vel_abs_mean_sum += float(leg_joint_vel.abs().mean().item())
+            if hasattr(robot.data, "applied_torque"):
+                leg_applied_torque = robot.data.applied_torque[:, leg_joint_ids_tensor]
+                self._align_debug_leg_applied_torque_abs_mean_sum += float(leg_applied_torque.abs().mean().item())
+                self._align_debug_leg_applied_torque_abs_max = max(
+                    self._align_debug_leg_applied_torque_abs_max, float(leg_applied_torque.abs().max().item())
+                )
+            if hasattr(robot.data, "computed_torque"):
+                leg_computed_torque = robot.data.computed_torque[:, leg_joint_ids_tensor]
+                self._align_debug_leg_computed_torque_abs_mean_sum += float(leg_computed_torque.abs().mean().item())
+                if hasattr(robot.data, "applied_torque"):
+                    self._align_debug_leg_torque_clip_abs_mean_sum += float(
+                        (leg_computed_torque - robot.data.applied_torque[:, leg_joint_ids_tensor]).abs().mean().item()
+                    )
+
     def _print_alignment_debug(self, it: int) -> None:
         if not hasattr(self, "_align_debug_steps") or self._align_debug_steps == 0:
             return
@@ -387,6 +423,7 @@ class RoboDuetAutomaticRunner:
         if not term_on_done:
             term_on_done = "none"
 
+        leg_steps = float(max(self._align_debug_leg_control_steps, 1))
         print(
             "[roboduet-align-debug] "
             f"it={it} mean_ep_len={mean_episode_length:.6g} "
@@ -400,6 +437,13 @@ class RoboDuetAutomaticRunner:
             f"roll_abs_max={self._align_debug_roll_abs_max:.6g} "
             f"pitch_abs_mean={self._align_debug_pitch_abs_mean_sum / steps:.6g} "
             f"pitch_abs_max={self._align_debug_pitch_abs_max:.6g} "
+            f"leg_target_delta_mean={self._align_debug_leg_target_delta_abs_mean_sum / leg_steps:.6g} "
+            f"leg_pos_error_mean={self._align_debug_leg_pos_error_abs_mean_sum / leg_steps:.6g} "
+            f"leg_vel_mean={self._align_debug_leg_vel_abs_mean_sum / leg_steps:.6g} "
+            f"leg_applied_torque_mean={self._align_debug_leg_applied_torque_abs_mean_sum / leg_steps:.6g} "
+            f"leg_applied_torque_max={self._align_debug_leg_applied_torque_abs_max:.6g} "
+            f"leg_computed_torque_mean={self._align_debug_leg_computed_torque_abs_mean_sum / leg_steps:.6g} "
+            f"leg_torque_clip_mean={self._align_debug_leg_torque_clip_abs_mean_sum / leg_steps:.6g} "
             f"term_on_done={term_on_done}",
             flush=True,
         )
