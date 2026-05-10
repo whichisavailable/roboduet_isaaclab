@@ -380,6 +380,12 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             arm_global_ids = self._roboduet_global_joint_ids[self._arm_strength_joint_ids]
             self._processed_actions[:, self._arm_strength_joint_ids] *= motor_strengths[:, arm_global_ids]
         self._env._go2arm_joint_pos_target = self._processed_actions.detach().clone()
+        target_global = torch.zeros_like(self._asset.data.default_joint_pos)
+        delta_global = torch.zeros_like(self._asset.data.default_joint_pos)
+        target_global[:, self._roboduet_global_joint_ids] = self._processed_actions
+        delta_global[:, self._roboduet_global_joint_ids] = delta_actions
+        self._env._go2arm_joint_pos_target_global = target_global.detach().clone()
+        self._env._go2arm_delta_action_global = delta_global.detach().clone()
 
     def reset(self, env_ids=None):
         super().reset(env_ids)
@@ -390,6 +396,8 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             "_go2arm_prev_effective_action",
             "_go2arm_prev_prev_effective_action",
             "_go2arm_joint_pos_target",
+            "_go2arm_joint_pos_target_global",
+            "_go2arm_delta_action_global",
             "_go2arm_last_joint_pos_target",
             "_go2arm_last_last_joint_pos_target",
         ):
