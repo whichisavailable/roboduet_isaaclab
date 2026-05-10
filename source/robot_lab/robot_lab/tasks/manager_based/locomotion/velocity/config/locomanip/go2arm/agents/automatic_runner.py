@@ -108,6 +108,8 @@ class RoboDuetAutomaticRunner:
         self.log_dir = log_dir
         self.device = device
         self.current_learning_iteration = 0
+        clip_actions_cfg = self.cfg.get("clip_actions", None)
+        self.clip_actions = None if clip_actions_cfg is None else float(clip_actions_cfg)
         self.export_deploy_models = bool(self.cfg.get("roboduet_export_deploy_models", True))
         self.gpu_world_size = 1
         self.gpu_global_rank = 0
@@ -310,13 +312,37 @@ class RoboDuetAutomaticRunner:
     def _step_env(self, dog_actions: torch.Tensor, arm_actions: torch.Tensor):
         if not self._command_term().switch_open:
             arm_actions = self.fake_arm_actions
-        full_action = torch.cat((dog_actions, arm_actions), dim=-1)
+        full_action_raw = torch.cat((dog_actions, arm_actions), dim=-1)
+        full_action = self._clip_full_action(full_action_raw)
         obs, _rew, dones, extras = self.env.step(full_action)
         raw_env = self.env.unwrapped
         self._record_alignment_debug_step(dones)
         rewards_dog = getattr(raw_env, "_roboduet_reward_dog").to(self.device)
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
         return obs, rewards_dog, rewards_arm, dones.to(self.device), extras
+
+    def _clip_full_action(self, full_action: torch.Tensor) -> torch.Tensor:
+        if self.clip_actions is None:
+            clipped_action = full_action
+        else:
+            clipped_action = torch.clamp(full_action, -self.clip_actions, self.clip_actions)
+        self._record_action_clip_debug(full_action, clipped_action)
+        return clipped_action
+
+    def _record_action_clip_debug(self, raw_action: torch.Tensor, clipped_action: torch.Tensor) -> None:
+        if not hasattr(self, "_align_debug_steps"):
+            self._reset_alignment_debug_accumulators()
+        raw_dog = raw_action[:, : self.dog_action_dim].detach()
+        clipped_dog = clipped_action[:, : self.dog_action_dim].detach()
+        clip_delta = (raw_dog - clipped_dog).abs()
+        self._align_debug_action_clip_steps += 1
+        self._align_debug_dog_raw_action_abs_mean_sum += float(raw_dog.abs().mean().item())
+        self._align_debug_dog_raw_action_abs_max = max(
+            self._align_debug_dog_raw_action_abs_max, float(raw_dog.abs().max().item())
+        )
+        self._align_debug_dog_clipped_action_abs_mean_sum += float(clipped_dog.abs().mean().item())
+        self._align_debug_dog_clip_delta_abs_mean_sum += float(clip_delta.mean().item())
+        self._align_debug_dog_clip_fraction_sum += float((clip_delta > 0.0).float().mean().item())
 
     def _reset_alignment_debug_accumulators(self) -> None:
         self._align_debug_steps = 0
@@ -338,6 +364,12 @@ class RoboDuetAutomaticRunner:
         self._align_debug_leg_applied_torque_abs_max = 0.0
         self._align_debug_leg_computed_torque_abs_mean_sum = 0.0
         self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
+        self._align_debug_action_clip_steps = 0
+        self._align_debug_dog_raw_action_abs_mean_sum = 0.0
+        self._align_debug_dog_raw_action_abs_max = 0.0
+        self._align_debug_dog_clipped_action_abs_mean_sum = 0.0
+        self._align_debug_dog_clip_delta_abs_mean_sum = 0.0
+        self._align_debug_dog_clip_fraction_sum = 0.0
 
     def _record_alignment_debug_step(self, dones: torch.Tensor) -> None:
         if not hasattr(self, "_align_debug_steps"):
@@ -424,6 +456,8 @@ class RoboDuetAutomaticRunner:
             term_on_done = "none"
 
         leg_steps = float(max(self._align_debug_leg_control_steps, 1))
+        action_clip_steps = float(max(self._align_debug_action_clip_steps, 1))
+        clip_limit = float("nan") if self.clip_actions is None else self.clip_actions
         print(
             "[roboduet-align-debug] "
             f"it={it} mean_ep_len={mean_episode_length:.6g} "
@@ -444,6 +478,12 @@ class RoboDuetAutomaticRunner:
             f"leg_applied_torque_max={self._align_debug_leg_applied_torque_abs_max:.6g} "
             f"leg_computed_torque_mean={self._align_debug_leg_computed_torque_abs_mean_sum / leg_steps:.6g} "
             f"leg_torque_clip_mean={self._align_debug_leg_torque_clip_abs_mean_sum / leg_steps:.6g} "
+            f"clip_limit={clip_limit:.6g} "
+            f"dog_raw_action_mean={self._align_debug_dog_raw_action_abs_mean_sum / action_clip_steps:.6g} "
+            f"dog_raw_action_max={self._align_debug_dog_raw_action_abs_max:.6g} "
+            f"dog_clipped_action_mean={self._align_debug_dog_clipped_action_abs_mean_sum / action_clip_steps:.6g} "
+            f"dog_clip_delta_mean={self._align_debug_dog_clip_delta_abs_mean_sum / action_clip_steps:.6g} "
+            f"dog_clip_fraction={self._align_debug_dog_clip_fraction_sum / action_clip_steps:.6g} "
             f"term_on_done={term_on_done}",
             flush=True,
         )
