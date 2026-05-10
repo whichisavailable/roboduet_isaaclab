@@ -427,7 +427,7 @@ class RoboDuetAutomaticRunner:
                 arm_loss_tuple = None
             dog_loss_tuple = self.alg_dog.update()
             learn_time = time.perf_counter() - update_start_time
-            self.current_learning_iteration = it + 1
+            self.current_learning_iteration = it
 
             loss_dict = self._make_loss_dict("dog", dog_loss_tuple)
             if arm_loss_tuple is not None:
@@ -457,7 +457,7 @@ class RoboDuetAutomaticRunner:
             self._log_roboduet_scalars(it)
 
             if self.log_dir is not None and it % int(self.cfg["save_interval"]) == 0:
-                self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+                self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
