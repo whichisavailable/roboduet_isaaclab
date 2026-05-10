@@ -330,19 +330,15 @@ class RoboDuetAutomaticRunner:
         return clipped_action
 
     def _record_action_clip_debug(self, raw_action: torch.Tensor, clipped_action: torch.Tensor) -> None:
+        del clipped_action
         if not hasattr(self, "_align_debug_steps"):
             self._reset_alignment_debug_accumulators()
         raw_dog = raw_action[:, : self.dog_action_dim].detach()
-        clipped_dog = clipped_action[:, : self.dog_action_dim].detach()
-        clip_delta = (raw_dog - clipped_dog).abs()
         self._align_debug_action_clip_steps += 1
         self._align_debug_dog_raw_action_abs_mean_sum += float(raw_dog.abs().mean().item())
         self._align_debug_dog_raw_action_abs_max = max(
             self._align_debug_dog_raw_action_abs_max, float(raw_dog.abs().max().item())
         )
-        self._align_debug_dog_clipped_action_abs_mean_sum += float(clipped_dog.abs().mean().item())
-        self._align_debug_dog_clip_delta_abs_mean_sum += float(clip_delta.mean().item())
-        self._align_debug_dog_clip_fraction_sum += float((clip_delta > 0.0).float().mean().item())
 
     def _reset_alignment_debug_accumulators(self) -> None:
         self._align_debug_steps = 0
@@ -362,6 +358,7 @@ class RoboDuetAutomaticRunner:
         self._align_debug_leg_computed_torque_abs_mean_sum = 0.0
         self._align_debug_leg_applied_torque_abs_mean_sum = 0.0
         self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
+        self._align_debug_action_clip_steps = 0
         self._align_debug_dog_raw_action_abs_mean_sum = 0.0
         self._align_debug_dog_raw_action_abs_max = 0.0
 
