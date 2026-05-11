@@ -3243,7 +3243,20 @@ def _compute_roboduet_reward_state(
         * arm_valid_2,
         dim=1,
     )
-    metrics["torques"] = torch.sum(torch.square(robot.data.applied_torque[:, leg_joint_cfg.joint_ids]), dim=1)
+    # Match upstream RoboDuet control_type="M" semantics: _compute_torques() returns a
+    # concatenated tensor whose loco slice is the clipped leg torque target and whose arm
+    # slice is the arm position target. The legacy local port only penalized Isaac's
+    # applied leg torque, which omits the arm position-target slice that upstream
+    # _reward_torques() includes via torch.sum(torch.square(self.env.torques), dim=1).
+    leg_torque_target_global = getattr(env, "_go2arm_leg_torque_target", None)
+    if torch.is_tensor(leg_torque_target_global):
+        leg_torque_for_reward = leg_torque_target_global[:, leg_joint_cfg.joint_ids]
+    else:
+        leg_torque_for_reward = robot.data.applied_torque[:, leg_joint_cfg.joint_ids]
+    metrics["torques"] = torch.sum(torch.square(leg_torque_for_reward), dim=1) + torch.sum(
+        torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids]),
+        dim=1,
+    )
     metrics["hip_action_l2"] = torch.sum(torch.square(roboduet_current_action(env)[:, [0, 3, 6, 9]]), dim=1)
 
     weighted_terms: dict[str, torch.Tensor] = {}
