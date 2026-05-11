@@ -158,10 +158,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     rsl_rl_init_noise_std: float = 1.0
     reward_log_interval_iterations: int = 1
     reward_log_steps_per_iteration: int = 24
-    enable_debug_reward_logging: bool = False
-    enable_collision_group_logging: bool = False
-    enable_contact_verification_logging: bool = False
-    enable_termination_debug_logging: bool = False
     enable_play_termination_reason_logging: bool = False
     roboduet_randomize_gravity: bool = True
     roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)

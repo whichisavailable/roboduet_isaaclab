@@ -381,8 +381,6 @@ class RoboDuetAutomaticRunner:
         full_action = self._clip_full_action(full_action_raw)
         obs, _rew, dones, extras = self.env.step(full_action)
         raw_env = self.env.unwrapped
-        self._record_alignment_debug_step(dones)
-        self._record_reward_diagnostics_step()
         rewards_dog = getattr(raw_env, "_roboduet_reward_dog").to(self.device)
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
         return obs, rewards_dog, rewards_arm, dones.to(self.device), extras
@@ -392,226 +390,7 @@ class RoboDuetAutomaticRunner:
             clipped_action = full_action
         else:
             clipped_action = torch.clamp(full_action, -self.clip_actions, self.clip_actions)
-        self._record_action_clip_debug(full_action, clipped_action)
         return clipped_action
-
-    def _record_action_clip_debug(self, raw_action: torch.Tensor, clipped_action: torch.Tensor) -> None:
-        del clipped_action
-        if not hasattr(self, "_align_debug_steps"):
-            self._reset_alignment_debug_accumulators()
-        raw_dog = raw_action[:, : self.dog_action_dim].detach()
-        self._align_debug_action_clip_steps += 1
-        self._align_debug_dog_raw_action_abs_mean_sum += float(raw_dog.abs().mean().item())
-        self._align_debug_dog_raw_action_abs_max = max(
-            self._align_debug_dog_raw_action_abs_max, float(raw_dog.abs().max().item())
-        )
-
-    def _reset_alignment_debug_accumulators(self) -> None:
-        self._align_debug_steps = 0
-        self._align_debug_done_count = 0.0
-        self._align_debug_terminated_count = 0.0
-        self._align_debug_timeout_count = 0.0
-        self._align_debug_height_mean_sum = 0.0
-        self._align_debug_height_min = float("inf")
-        self._align_debug_term_done_sums = {}
-        self._align_debug_leg_control_steps = 0
-        self._align_debug_leg_torque_target_abs_mean_sum = 0.0
-        self._align_debug_leg_computed_torque_abs_mean_sum = 0.0
-        self._align_debug_leg_applied_torque_abs_mean_sum = 0.0
-        self._align_debug_leg_torque_target_diff_abs_mean_sum = 0.0
-        self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
-        self._align_debug_leg_torque_target_l2_sum = 0.0
-        self._align_debug_leg_applied_torque_l2_sum = 0.0
-        self._align_debug_arm_position_target_l2_sum = 0.0
-        self._align_debug_upstream_like_torques_l2_sum = 0.0
-        self._align_debug_action_clip_steps = 0
-        self._align_debug_dog_raw_action_abs_mean_sum = 0.0
-        self._align_debug_dog_raw_action_abs_max = 0.0
-        self._align_debug_reward_steps = 0
-        self._align_debug_reward_scalar_sums = {}
-        self._align_debug_reward_term_scaled_mean_sums = {}
-        self._align_debug_reward_term_abs_mean_sums = {}
-        self._align_debug_reward_term_pos_frac_sums = {}
-        self._align_debug_reward_term_neg_frac_sums = {}
-        self._align_debug_reward_term_batch_sign_sums = {}
-        self._align_debug_reward_term_mixed_sign_steps = {}
-
-    def _record_alignment_debug_step(self, dones: torch.Tensor) -> None:
-        if not hasattr(self, "_align_debug_steps"):
-            self._reset_alignment_debug_accumulators()
-
-        raw_env = self.env.unwrapped
-        dones = dones.detach().to(device=raw_env.device, dtype=torch.bool)
-        done_count = float(dones.sum().item())
-        self._align_debug_steps += 1
-        self._align_debug_done_count += done_count
-
-        terminated = getattr(raw_env, "reset_terminated", None)
-        if terminated is not None:
-            terminated = terminated.detach().to(device=raw_env.device, dtype=torch.bool)
-            self._align_debug_terminated_count += float((terminated & dones).sum().item())
-        timeouts = getattr(raw_env, "reset_time_outs", None)
-        if timeouts is not None:
-            timeouts = timeouts.detach().to(device=raw_env.device, dtype=torch.bool)
-            self._align_debug_timeout_count += float((timeouts & dones).sum().item())
-
-        termination_manager = getattr(raw_env, "termination_manager", None)
-        if termination_manager is not None and done_count > 0.0:
-            for term_name in termination_manager.active_terms:
-                term_value = termination_manager.get_term(term_name).detach().to(device=raw_env.device, dtype=torch.bool)
-                self._align_debug_term_done_sums[term_name] = self._align_debug_term_done_sums.get(term_name, 0.0) + float(
-                    (term_value & dones).sum().item()
-                )
-
-        robot = raw_env.scene["robot"]
-        base_height = robot.data.root_pos_w[:, 2]
-        gravity_b = robot.data.projected_gravity_b
-        self._align_debug_height_mean_sum += float(base_height.mean().item())
-        self._align_debug_height_min = min(self._align_debug_height_min, float(base_height.min().item()))
-
-        leg_joint_ids = getattr(raw_env, "_go2arm_leg_joint_ids", None)
-        leg_torque_target_global = getattr(raw_env, "_go2arm_leg_torque_target", None)
-        active_envs = ~dones
-        if leg_joint_ids is not None and leg_torque_target_global is not None and torch.any(active_envs):
-            leg_joint_ids_tensor = torch.as_tensor(leg_joint_ids, dtype=torch.long, device=raw_env.device)
-            leg_torque_target = leg_torque_target_global[:, leg_joint_ids_tensor][active_envs]
-            self._align_debug_leg_control_steps += 1
-            self._align_debug_leg_torque_target_abs_mean_sum += float(leg_torque_target.abs().mean().item())
-            self._align_debug_leg_torque_target_l2_sum += float(
-                torch.sum(torch.square(leg_torque_target), dim=1).mean().item()
-            )
-            if hasattr(robot.data, "computed_torque"):
-                leg_computed_torque = robot.data.computed_torque[:, leg_joint_ids_tensor][active_envs]
-                self._align_debug_leg_computed_torque_abs_mean_sum += float(leg_computed_torque.abs().mean().item())
-                self._align_debug_leg_torque_target_diff_abs_mean_sum += float(
-                    (leg_torque_target - leg_computed_torque).abs().mean().item()
-                )
-            if hasattr(robot.data, "applied_torque"):
-                leg_applied_torque = robot.data.applied_torque[:, leg_joint_ids_tensor][active_envs]
-                self._align_debug_leg_applied_torque_abs_mean_sum += float(leg_applied_torque.abs().mean().item())
-                self._align_debug_leg_applied_torque_l2_sum += float(
-                    torch.sum(torch.square(leg_applied_torque), dim=1).mean().item()
-                )
-                if hasattr(robot.data, "computed_torque"):
-                    self._align_debug_leg_torque_clip_abs_mean_sum += float(
-                        (robot.data.computed_torque[:, leg_joint_ids_tensor][active_envs] - leg_applied_torque)
-                        .abs()
-                        .mean()
-                        .item()
-                    )
-            arm_joint_ids = getattr(raw_env, "_go2arm_arm_joint_ids", None)
-            joint_pos_target = getattr(raw_env, "_go2arm_joint_pos_target", None)
-            if arm_joint_ids is not None and joint_pos_target is not None:
-                arm_joint_ids_tensor = torch.as_tensor(arm_joint_ids, dtype=torch.long, device=raw_env.device)
-                arm_position_target = joint_pos_target[:, arm_joint_ids_tensor][active_envs]
-                arm_position_l2 = torch.sum(torch.square(arm_position_target), dim=1)
-                leg_target_l2 = torch.sum(torch.square(leg_torque_target), dim=1)
-                self._align_debug_arm_position_target_l2_sum += float(arm_position_l2.mean().item())
-                self._align_debug_upstream_like_torques_l2_sum += float((leg_target_l2 + arm_position_l2).mean().item())
-
-    def _record_reward_diagnostics_step(self) -> None:
-        if not hasattr(self, "_align_debug_steps"):
-            self._reset_alignment_debug_accumulators()
-
-        raw_env = self.env.unwrapped
-        cached_state = getattr(raw_env, "_roboduet_reward_step_cache", None)
-        if not isinstance(cached_state, dict):
-            return
-        reward_state = cached_state.get("value")
-        if not isinstance(reward_state, dict):
-            return
-
-        reward_dt = float(getattr(raw_env, "step_dt", 1.0))
-        self._align_debug_reward_steps += 1
-        for key in (
-            "reward_dog_scaled",
-            "reward_dog_linear_scaled",
-            "reward_arm_scaled",
-            "reward_arm_linear_scaled",
-            "total_adjustment",
-        ):
-            value = reward_state.get(key)
-            if not torch.is_tensor(value):
-                continue
-            logged_value = value.detach()
-            if key == "total_adjustment":
-                logged_value = logged_value * reward_dt
-            self._align_debug_reward_scalar_sums[key] = self._align_debug_reward_scalar_sums.get(key, 0.0) + float(
-                logged_value.mean().item()
-            )
-
-        weighted_terms = reward_state.get("weighted_terms")
-        if not isinstance(weighted_terms, dict):
-            return
-        for name, term_value in weighted_terms.items():
-            if not torch.is_tensor(term_value):
-                continue
-            scaled_term = term_value.detach() * reward_dt
-            self._align_debug_reward_term_scaled_mean_sums[name] = (
-                self._align_debug_reward_term_scaled_mean_sums.get(name, 0.0) + float(scaled_term.mean().item())
-            )
-            self._align_debug_reward_term_abs_mean_sums[name] = (
-                self._align_debug_reward_term_abs_mean_sums.get(name, 0.0) + float(scaled_term.abs().mean().item())
-            )
-            self._align_debug_reward_term_pos_frac_sums[name] = (
-                self._align_debug_reward_term_pos_frac_sums.get(name, 0.0)
-                + float((scaled_term > 0.0).float().mean().item())
-            )
-            self._align_debug_reward_term_neg_frac_sums[name] = (
-                self._align_debug_reward_term_neg_frac_sums.get(name, 0.0)
-                + float((scaled_term < 0.0).float().mean().item())
-            )
-            batch_sum = float(scaled_term.sum().item())
-            batch_sign = 1.0 if batch_sum > 0.0 else (-1.0 if batch_sum < 0.0 else 0.0)
-            self._align_debug_reward_term_batch_sign_sums[name] = (
-                self._align_debug_reward_term_batch_sign_sums.get(name, 0.0) + batch_sign
-            )
-            mixed_sign = torch.any(scaled_term > 0.0) and torch.any(scaled_term < 0.0)
-            self._align_debug_reward_term_mixed_sign_steps[name] = (
-                self._align_debug_reward_term_mixed_sign_steps.get(name, 0.0) + float(bool(mixed_sign))
-            )
-
-    def _print_alignment_debug(self, it: int) -> None:
-        if not hasattr(self, "_align_debug_steps") or self._align_debug_steps == 0:
-            return
-
-        steps = float(self._align_debug_steps)
-        num_envs = float(self.env.num_envs)
-        done_rate = self._align_debug_done_count / max(steps * num_envs, 1.0)
-        terminal_rate_on_done = self._align_debug_terminated_count / max(self._align_debug_done_count, 1.0)
-        timeout_rate_on_done = self._align_debug_timeout_count / max(self._align_debug_done_count, 1.0)
-        mean_episode_length = statistics.mean(self.logger.lenbuffer) if len(self.logger.lenbuffer) > 0 else float("nan")
-        term_on_done = ",".join(
-            f"{name}:{count / max(self._align_debug_done_count, 1.0):.3g}"
-            for name, count in sorted(self._align_debug_term_done_sums.items())
-        )
-        if not term_on_done:
-            term_on_done = "none"
-
-        leg_steps = float(max(self._align_debug_leg_control_steps, 1))
-        action_clip_steps = float(max(self._align_debug_action_clip_steps, 1))
-        reward_steps = float(max(self._align_debug_reward_steps, 1))
-        reward_dog = self._align_debug_reward_scalar_sums.get("reward_dog_scaled", 0.0) / reward_steps
-        reward_linear = self._align_debug_reward_scalar_sums.get("reward_dog_linear_scaled", 0.0) / reward_steps
-        torque_term = self._align_debug_reward_term_scaled_mean_sums.get("torques", 0.0) / reward_steps
-        print(
-            "[roboduet-debug] "
-            f"it={it} ep_len={mean_episode_length:.6g} "
-            f"term={terminal_rate_on_done:.3g} timeout={timeout_rate_on_done:.3g} "
-            f"h_mean={self._align_debug_height_mean_sum / steps:.6g} h_min={self._align_debug_height_min:.6g} "
-            f"leg_tau={self._align_debug_leg_torque_target_abs_mean_sum / leg_steps:.6g} "
-            f"tau_isaac={self._align_debug_leg_computed_torque_abs_mean_sum / leg_steps:.6g} "
-            f"tau_diff={self._align_debug_leg_torque_target_diff_abs_mean_sum / leg_steps:.6g} "
-            f"tau_applied={self._align_debug_leg_applied_torque_abs_mean_sum / leg_steps:.6g} "
-            f"tau_clip={self._align_debug_leg_torque_clip_abs_mean_sum / leg_steps:.6g} "
-            f"tau2_target={self._align_debug_leg_torque_target_l2_sum / leg_steps:.6g} "
-            f"tau2_up_like={self._align_debug_upstream_like_torques_l2_sum / leg_steps:.6g} "
-            f"rew={reward_dog:.6g} rew_linear={reward_linear:.6g} rew_torque={torque_term:.6g} "
-            f"raw_act={self._align_debug_dog_raw_action_abs_mean_sum / action_clip_steps:.6g} "
-            f"raw_act_max={self._align_debug_dog_raw_action_abs_max:.6g} "
-            f"done={term_on_done}",
-            flush=True,
-        )
 
     @staticmethod
     def _make_loss_dict(prefix: str, loss_tuple) -> dict[str, float]:
@@ -638,100 +417,16 @@ class RoboDuetAutomaticRunner:
         self.cur_arm_reward_sum[new_ids] = 0
 
     def _log_roboduet_scalars(self, it: int) -> None:
-        command_term = self._command_term()
-        raw_env = self.env.unwrapped
-        switch_open = bool(command_term.switch_open)
-        arm_obs_abs_max = command_term.commands_arm_obs.abs().max().item()
-        cmd_pitch_roll_abs_mean = command_term.commands_dog[:, 3:5].abs().mean().item()
-        cmd_velocity_abs_mean = command_term.commands_dog[:, :3].abs().mean().item()
-        effective_leg_action_abs_mean = float("nan")
-        effective_arm_action_abs_mean = float("nan")
-        effective_arm_action_abs_max = float("nan")
-        if hasattr(raw_env, "_go2arm_effective_action"):
-            effective_action = raw_env._go2arm_effective_action
-            effective_leg_action_abs_mean = effective_action[:, : self.dog_action_dim].abs().mean().item()
-            effective_arm_action_abs_mean = effective_action[:, self.dog_action_dim :].abs().mean().item()
-            effective_arm_action_abs_max = effective_action[:, self.dog_action_dim :].abs().max().item()
-
         writer = self.logger.writer
         if writer is not None:
-            writer.add_scalar("RoboDuet/switch_open", float(switch_open), it)
             writer.add_scalar("Policy/dog_mean_std", self.dog_model.std.mean().item(), it)
             writer.add_scalar("Policy/arm_mean_std", self.arm_model.std.mean().item(), it)
-            writer.add_scalar("RoboDuet/stage1_arm_effective_action_abs_max", effective_arm_action_abs_max, it)
-            writer.add_scalar("RoboDuet/stage1_arm_obs_abs_max", arm_obs_abs_max, it)
-            writer.add_scalar("RoboDuet/effective_leg_action_abs_mean", effective_leg_action_abs_mean, it)
-            writer.add_scalar("RoboDuet/effective_arm_action_abs_mean", effective_arm_action_abs_mean, it)
-            writer.add_scalar("RoboDuet/effective_arm_action_abs_max", effective_arm_action_abs_max, it)
-            writer.add_scalar("RoboDuet/stage1_command_pitch_roll_abs_mean", cmd_pitch_roll_abs_mean, it)
-            writer.add_scalar("RoboDuet/stage1_command_velocity_abs_mean", cmd_velocity_abs_mean, it)
-            leg_steps = float(max(self._align_debug_leg_control_steps, 1))
-            reward_steps = float(max(self._align_debug_reward_steps, 1))
-            writer.add_scalar("RoboDuetDiag/leg_torque_target_l2", self._align_debug_leg_torque_target_l2_sum / leg_steps, it)
-            writer.add_scalar("RoboDuetDiag/leg_applied_torque_l2", self._align_debug_leg_applied_torque_l2_sum / leg_steps, it)
-            writer.add_scalar("RoboDuetDiag/arm_position_target_l2", self._align_debug_arm_position_target_l2_sum / leg_steps, it)
-            writer.add_scalar(
-                "RoboDuetDiag/upstream_like_torques_l2",
-                self._align_debug_upstream_like_torques_l2_sum / leg_steps,
-                it,
-            )
-            for scalar_name, scalar_sum in self._align_debug_reward_scalar_sums.items():
-                writer.add_scalar(f"RoboDuetDiag/reward_scalar/{scalar_name}", scalar_sum / reward_steps, it)
-            reward_diag_terms = (
-                "tracking_lin_vel",
-                "tracking_ang_vel",
-                "tracking_contacts_shaped_force",
-                "tracking_contacts_shaped_vel",
-                "loco_energy",
-                "torques",
-                "dof_acc",
-                "action_rate",
-                "action_smoothness_1",
-                "action_smoothness_2",
-                "feet_slip",
-                "collision",
-            )
-            for reward_name in reward_diag_terms:
-                if reward_name not in self._align_debug_reward_term_scaled_mean_sums:
-                    continue
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_scaled_mean/{reward_name}",
-                    self._align_debug_reward_term_scaled_mean_sums[reward_name] / reward_steps,
-                    it,
-                )
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_abs_mean/{reward_name}",
-                    self._align_debug_reward_term_abs_mean_sums[reward_name] / reward_steps,
-                    it,
-                )
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_neg_frac/{reward_name}",
-                    self._align_debug_reward_term_neg_frac_sums[reward_name] / reward_steps,
-                    it,
-                )
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_pos_frac/{reward_name}",
-                    self._align_debug_reward_term_pos_frac_sums[reward_name] / reward_steps,
-                    it,
-                )
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_batch_sign/{reward_name}",
-                    self._align_debug_reward_term_batch_sign_sums[reward_name] / reward_steps,
-                    it,
-                )
-                writer.add_scalar(
-                    f"RoboDuetDiag/reward_term_mixed_sign/{reward_name}",
-                    self._align_debug_reward_term_mixed_sign_steps[reward_name] / reward_steps,
-                    it,
-                )
             if len(self.arm_rewbuffer) > 0:
                 writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
                 if getattr(self.logger, "logger_type", "tensorboard") != "wandb":
                     writer.add_scalar(
                         "Train/mean_arm_reward/time", statistics.mean(self.arm_rewbuffer), int(self.logger.tot_time)
                     )
-
-        self._print_alignment_debug(it)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if init_at_random_ep_len:
@@ -758,7 +453,6 @@ class RoboDuetAutomaticRunner:
             elif dog_obs_dict is None:
                 dog_obs_dict = self._get_dog_observations()
 
-            self._reset_alignment_debug_accumulators()
             rollout_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env + 1):

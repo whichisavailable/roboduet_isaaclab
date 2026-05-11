@@ -1526,31 +1526,21 @@ def non_success_termination_penalty(
 def _compute_go2arm_reward_terms(
     env: ManagerBasedRLEnv,
     total_reward_term_name: str = "total_reward",
-    store_cache: bool = True,
 ) -> dict[str, torch.Tensor]:
-    """Compute and cache go2arm reward atomics for the current step."""
+    """Compute go2arm total reward for the current step."""
     params = _get_go2arm_total_reward_params(env, total_reward_term_name)
     command_term = _ee_pose_command_term(env, params["gating_command_name"])
 
     # -----------------------------
     # 1) 单步快照：同一步里 gate / mani / loco / debug 统一用这一份
     # -----------------------------
-    if store_cache:
-        tracking_error = command_term.tracking_error.clone()
-        position_tracking_error = command_term.position_tracking_error.clone()
-        orientation_tracking_error = command_term.orientation_tracking_error.clone()
-        reference_tracking_error = command_term.reference_tracking_error.clone()
-        cumulative_tracking_error = command_term.cumulative_tracking_error.clone()
-        ee_pos_b = command_term.ee_pos_b.clone()
-        target_pos_b = command_term.target_pos_b.clone()
-    else:
-        tracking_error = command_term.tracking_error
-        position_tracking_error = command_term.position_tracking_error
-        orientation_tracking_error = command_term.orientation_tracking_error
-        reference_tracking_error = command_term.reference_tracking_error
-        cumulative_tracking_error = command_term.cumulative_tracking_error
-        ee_pos_b = command_term.ee_pos_b
-        target_pos_b = command_term.target_pos_b
+    tracking_error = command_term.tracking_error
+    position_tracking_error = command_term.position_tracking_error
+    orientation_tracking_error = command_term.orientation_tracking_error
+    reference_tracking_error = command_term.reference_tracking_error
+    cumulative_tracking_error = command_term.cumulative_tracking_error
+    ee_pos_b = command_term.ee_pos_b
+    target_pos_b = command_term.target_pos_b
     del ee_pos_b, target_pos_b
     # -----------------------------
     # 2) gate：直接用冻结后的 reference_tracking_error
@@ -1701,10 +1691,7 @@ def _compute_go2arm_reward_terms(
     # -----------------------------
     potential_term_cfg = _get_go2arm_potential_term_cfg(env)
     if isinstance(potential_term_cfg.func, EETrackingPotentialReward):
-        if store_cache:
-            ee_tracking_potential_value = potential_term_cfg.func.last_reward.clone()
-        else:
-            ee_tracking_potential_value = potential_term_cfg.func.last_reward
+        ee_tracking_potential_value = potential_term_cfg.func.last_reward
     else:
         ee_tracking_potential_value = torch.zeros(env.num_envs, device=env.device)
 
@@ -1925,71 +1912,7 @@ def _compute_go2arm_reward_terms(
     # -----------------------------
     # 11) 单次计算后统一缓存，供日志直接复用
     # -----------------------------
-    if not store_cache:
-        return {"total_reward_debug": total}
-
-    cache = {
-        "gate_d": gate,
-        "tracking_error": tracking_error,
-        "position_tracking_error": position_tracking_error,
-        "orientation_tracking_error": orientation_tracking_error,
-        "reference_tracking_error": reference_tracking_error,
-        "cumulative_tracking_error": cumulative_tracking_error,
-        "ee_position_raw": ee_position_raw,
-        "ee_position_enhanced": ee_position_enhanced,
-        "ee_orientation_raw": ee_orientation_raw,
-        "ee_orientation_enhanced": ee_orientation_enhanced,
-        "support_roll_penalty": support_roll_weighted,
-        "support_feet_slide_penalty": support_feet_slide_weighted,
-        "support_foot_air_penalty": support_foot_air_weighted,
-        "support_non_foot_contact_penalty": support_non_foot_contact_weighted,
-        "target_height_pitch_penalty": target_height_pitch_weighted,
-        "min_base_height_penalty": min_base_height_weighted,
-        "posture_deviation_penalty": posture_deviation_weighted,
-        "joint_limit_safety_penalty": joint_limit_safety_weighted,
-        "support_left_right_x_symmetry_penalty": support_left_right_x_symmetry_weighted,
-        "support_left_right_y_symmetry_penalty": support_left_right_y_symmetry_weighted,
-        "support_foot_xy_range_penalty": support_foot_xy_range_weighted,
-        "mani_regularization_raw": mani_regularization_raw,
-        "mani_regularization": mani_regularization,
-        "ee_tracking_potential": ee_tracking_potential_weighted,
-        "ee_cumulative_tracking_error_penalty": ee_cumulative_penalty_weighted,
-        "workspace_position_penalty": workspace_position_reward_weighted,
-        "workspace_position_reward": workspace_position_reward_weighted,
-        "mani_reward": (1.0 - gate) * mani_total,
-        "locomotion_tracking": locomotion_tracking,
-        "moving_arm_default_deviation_penalty": moving_arm_deviation_weighted,
-        "moving_arm_joint_velocity_penalty": moving_arm_dynamic_weighted,
-        "base_height_penalty": base_height_weighted,
-        "base_roll_penalty": base_roll_weighted,
-        "base_pitch_penalty": base_pitch_weighted,
-        "base_roll_ang_vel_penalty": base_roll_ang_vel_weighted,
-        "base_pitch_ang_vel_penalty": base_pitch_ang_vel_weighted,
-        "base_z_vel_penalty": base_z_vel_weighted,
-        "base_lateral_vel_penalty": base_lateral_vel_weighted,
-        "leg_posture_deviation_penalty": leg_posture_deviation_weighted,
-        "touchdown_left_right_x_symmetry_penalty": touchdown_left_right_x_symmetry_weighted,
-        "touchdown_left_right_y_symmetry_penalty": touchdown_left_right_y_symmetry_weighted,
-        "touchdown_foot_y_distance_penalty": touchdown_foot_y_distance_weighted,
-        "diagonal_foot_symmetry_penalty": diagonal_foot_symmetry_weighted,
-        "feet_contact_soft_trot_weighted_gate": feet_contact_soft_trot_factor,
-        "loco_regularization_base_raw": loco_regularization_base_raw,
-        "loco_regularization": loco_regularization,
-        "loco_reward": gate * loco_total,
-        "basic_is_alive": basic_is_alive_weighted,
-        "basic_collision_penalty": basic_collision_weighted,
-        "basic_action_smoothness_first": basic_action_smoothness_first_weighted,
-        "basic_action_smoothness_second": basic_action_smoothness_second_weighted,
-        "basic_joint_torque_sq_penalty": basic_joint_torque_sq_weighted,
-        "basic_joint_power_penalty": basic_joint_power_weighted,
-        "basic_reward": basic_total,
-        "basic_termination_penalty": basic_termination_penalty_weighted,
-        "total_reward_debug": total,
-    }
-
-    env._go2arm_reward_cache = cache
-    env._go2arm_reward_cache_term_name = total_reward_term_name
-    return cache
+    return {"total_reward_debug": total}
 
 
 def total_reward(
@@ -2284,23 +2207,8 @@ def total_reward(
         basic_joint_power_asset_cfg,
         basic_joint_power_normalize_by_effort_limit,
     )
-    cache = _compute_go2arm_reward_terms(
-        env,
-        store_cache=bool(getattr(env, "_enable_debug_reward_logging", False)),
-    )
+    cache = _compute_go2arm_reward_terms(env)
     return cache["total_reward_debug"]
-
-
-def go2arm_reward_debug_terms(
-    env: ManagerBasedRLEnv, total_reward_term_name: str = "total_reward"
-) -> dict[str, torch.Tensor]:
-    """Return cached go2arm reward atomics for logging."""
-    cache = getattr(env, "_go2arm_reward_cache", None)
-    cache_term_name = getattr(env, "_go2arm_reward_cache_term_name", None)
-    if cache is not None and cache_term_name == total_reward_term_name:
-        return cache
-    return _compute_go2arm_reward_terms(env, total_reward_term_name=total_reward_term_name, store_cache=True)
-
 
 def track_lin_vel_xy_exp(
     env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
