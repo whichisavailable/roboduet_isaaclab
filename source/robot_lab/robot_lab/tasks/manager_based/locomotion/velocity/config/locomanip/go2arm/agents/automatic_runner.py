@@ -261,6 +261,59 @@ class RoboDuetAutomaticRunner:
             return loaded_obj[state_key]
         return loaded_obj
 
+    @staticmethod
+    def _print_state_dict_debug(label: str, state_dict, model: nn.Module | None = None) -> None:
+        if not isinstance(state_dict, dict):
+            print(f"[ROBODUET LOAD] {label}: object_type={type(state_dict).__name__}, expected dict/state_dict.")
+            return
+
+        tensor_items = [(key, value) for key, value in state_dict.items() if torch.is_tensor(value)]
+        tensor_numel = sum(int(value.numel()) for _, value in tensor_items)
+        tensor_l2_sq = 0.0
+        tensor_abs_max = 0.0
+        for _, value in tensor_items:
+            value_f = value.detach().float()
+            if value_f.numel() == 0:
+                continue
+            tensor_l2_sq += float(torch.sum(value_f * value_f).item())
+            tensor_abs_max = max(tensor_abs_max, float(value_f.abs().max().item()))
+
+        first_keys = [str(key) for key in list(state_dict.keys())[:8]]
+        print(
+            f"[ROBODUET LOAD] {label}: state_keys={len(state_dict)} tensor_keys={len(tensor_items)} "
+            f"tensor_numel={tensor_numel} tensor_l2={tensor_l2_sq ** 0.5:.6g} "
+            f"tensor_abs_max={tensor_abs_max:.6g} first_keys={first_keys}"
+        )
+
+        if model is None:
+            return
+        model_state = model.state_dict()
+        model_keys = list(model_state.keys())
+        state_keys = set(state_dict.keys())
+        missing = [key for key in model_keys if key not in state_keys]
+        unexpected = [key for key in state_dict.keys() if key not in model_state]
+        shape_mismatch = []
+        for key in model_keys:
+            if key not in state_dict:
+                continue
+            if torch.is_tensor(state_dict[key]) and tuple(state_dict[key].shape) != tuple(model_state[key].shape):
+                shape_mismatch.append((key, tuple(state_dict[key].shape), tuple(model_state[key].shape)))
+        print(
+            f"[ROBODUET LOAD] {label}: precheck missing={len(missing)} unexpected={len(unexpected)} "
+            f"shape_mismatch={len(shape_mismatch)} "
+            f"missing_preview={missing[:8]} unexpected_preview={unexpected[:8]} "
+            f"shape_mismatch_preview={shape_mismatch[:4]}"
+        )
+
+    @staticmethod
+    def _print_load_result(label: str, load_result) -> None:
+        missing = list(getattr(load_result, "missing_keys", []) or [])
+        unexpected = list(getattr(load_result, "unexpected_keys", []) or [])
+        print(
+            f"[ROBODUET LOAD] {label}: load_state_dict missing={len(missing)} unexpected={len(unexpected)} "
+            f"missing_preview={missing[:8]} unexpected_preview={unexpected[:8]}"
+        )
+
     def _load_pretrained_components(self) -> None:
         dog_checkpoint = self.cfg.get("roboduet_pretrained_dog_checkpoint")
         arm_checkpoint = self.cfg.get("roboduet_pretrained_arm_checkpoint")
@@ -317,6 +370,7 @@ class RoboDuetAutomaticRunner:
         obs, _rew, dones, extras = self.env.step(full_action)
         raw_env = self.env.unwrapped
         self._record_alignment_debug_step(dones)
+        self._record_reward_diagnostics_step()
         rewards_dog = getattr(raw_env, "_roboduet_reward_dog").to(self.device)
         rewards_arm = getattr(raw_env, "_roboduet_reward_arm").to(self.device)
         return obs, rewards_dog, rewards_arm, dones.to(self.device), extras
@@ -354,9 +408,21 @@ class RoboDuetAutomaticRunner:
         self._align_debug_leg_applied_torque_abs_mean_sum = 0.0
         self._align_debug_leg_torque_target_diff_abs_mean_sum = 0.0
         self._align_debug_leg_torque_clip_abs_mean_sum = 0.0
+        self._align_debug_leg_torque_target_l2_sum = 0.0
+        self._align_debug_leg_applied_torque_l2_sum = 0.0
+        self._align_debug_arm_position_target_l2_sum = 0.0
+        self._align_debug_upstream_like_torques_l2_sum = 0.0
         self._align_debug_action_clip_steps = 0
         self._align_debug_dog_raw_action_abs_mean_sum = 0.0
         self._align_debug_dog_raw_action_abs_max = 0.0
+        self._align_debug_reward_steps = 0
+        self._align_debug_reward_scalar_sums = {}
+        self._align_debug_reward_term_scaled_mean_sums = {}
+        self._align_debug_reward_term_abs_mean_sums = {}
+        self._align_debug_reward_term_pos_frac_sums = {}
+        self._align_debug_reward_term_neg_frac_sums = {}
+        self._align_debug_reward_term_batch_sign_sums = {}
+        self._align_debug_reward_term_mixed_sign_steps = {}
 
     def _record_alignment_debug_step(self, dones: torch.Tensor) -> None:
         if not hasattr(self, "_align_debug_steps"):
@@ -399,6 +465,9 @@ class RoboDuetAutomaticRunner:
             leg_torque_target = leg_torque_target_global[:, leg_joint_ids_tensor][active_envs]
             self._align_debug_leg_control_steps += 1
             self._align_debug_leg_torque_target_abs_mean_sum += float(leg_torque_target.abs().mean().item())
+            self._align_debug_leg_torque_target_l2_sum += float(
+                torch.sum(torch.square(leg_torque_target), dim=1).mean().item()
+            )
             if hasattr(robot.data, "computed_torque"):
                 leg_computed_torque = robot.data.computed_torque[:, leg_joint_ids_tensor][active_envs]
                 self._align_debug_leg_computed_torque_abs_mean_sum += float(leg_computed_torque.abs().mean().item())
@@ -408,6 +477,9 @@ class RoboDuetAutomaticRunner:
             if hasattr(robot.data, "applied_torque"):
                 leg_applied_torque = robot.data.applied_torque[:, leg_joint_ids_tensor][active_envs]
                 self._align_debug_leg_applied_torque_abs_mean_sum += float(leg_applied_torque.abs().mean().item())
+                self._align_debug_leg_applied_torque_l2_sum += float(
+                    torch.sum(torch.square(leg_applied_torque), dim=1).mean().item()
+                )
                 if hasattr(robot.data, "computed_torque"):
                     self._align_debug_leg_torque_clip_abs_mean_sum += float(
                         (robot.data.computed_torque[:, leg_joint_ids_tensor][active_envs] - leg_applied_torque)
@@ -415,6 +487,77 @@ class RoboDuetAutomaticRunner:
                         .mean()
                         .item()
                     )
+            arm_joint_ids = getattr(raw_env, "_go2arm_arm_joint_ids", None)
+            joint_pos_target = getattr(raw_env, "_go2arm_joint_pos_target", None)
+            if arm_joint_ids is not None and joint_pos_target is not None:
+                arm_joint_ids_tensor = torch.as_tensor(arm_joint_ids, dtype=torch.long, device=raw_env.device)
+                arm_position_target = joint_pos_target[:, arm_joint_ids_tensor][active_envs]
+                arm_position_l2 = torch.sum(torch.square(arm_position_target), dim=1)
+                leg_target_l2 = torch.sum(torch.square(leg_torque_target), dim=1)
+                self._align_debug_arm_position_target_l2_sum += float(arm_position_l2.mean().item())
+                self._align_debug_upstream_like_torques_l2_sum += float((leg_target_l2 + arm_position_l2).mean().item())
+
+    def _record_reward_diagnostics_step(self) -> None:
+        if not hasattr(self, "_align_debug_steps"):
+            self._reset_alignment_debug_accumulators()
+
+        raw_env = self.env.unwrapped
+        cached_state = getattr(raw_env, "_roboduet_reward_step_cache", None)
+        if not isinstance(cached_state, dict):
+            return
+        reward_state = cached_state.get("value")
+        if not isinstance(reward_state, dict):
+            return
+
+        reward_dt = float(getattr(raw_env, "step_dt", 1.0))
+        self._align_debug_reward_steps += 1
+        for key in (
+            "reward_dog_scaled",
+            "reward_dog_linear_scaled",
+            "reward_arm_scaled",
+            "reward_arm_linear_scaled",
+            "total_adjustment",
+        ):
+            value = reward_state.get(key)
+            if not torch.is_tensor(value):
+                continue
+            logged_value = value.detach()
+            if key == "total_adjustment":
+                logged_value = logged_value * reward_dt
+            self._align_debug_reward_scalar_sums[key] = self._align_debug_reward_scalar_sums.get(key, 0.0) + float(
+                logged_value.mean().item()
+            )
+
+        weighted_terms = reward_state.get("weighted_terms")
+        if not isinstance(weighted_terms, dict):
+            return
+        for name, term_value in weighted_terms.items():
+            if not torch.is_tensor(term_value):
+                continue
+            scaled_term = term_value.detach() * reward_dt
+            self._align_debug_reward_term_scaled_mean_sums[name] = (
+                self._align_debug_reward_term_scaled_mean_sums.get(name, 0.0) + float(scaled_term.mean().item())
+            )
+            self._align_debug_reward_term_abs_mean_sums[name] = (
+                self._align_debug_reward_term_abs_mean_sums.get(name, 0.0) + float(scaled_term.abs().mean().item())
+            )
+            self._align_debug_reward_term_pos_frac_sums[name] = (
+                self._align_debug_reward_term_pos_frac_sums.get(name, 0.0)
+                + float((scaled_term > 0.0).float().mean().item())
+            )
+            self._align_debug_reward_term_neg_frac_sums[name] = (
+                self._align_debug_reward_term_neg_frac_sums.get(name, 0.0)
+                + float((scaled_term < 0.0).float().mean().item())
+            )
+            batch_sum = float(scaled_term.sum().item())
+            batch_sign = 1.0 if batch_sum > 0.0 else (-1.0 if batch_sum < 0.0 else 0.0)
+            self._align_debug_reward_term_batch_sign_sums[name] = (
+                self._align_debug_reward_term_batch_sign_sums.get(name, 0.0) + batch_sign
+            )
+            mixed_sign = torch.any(scaled_term > 0.0) and torch.any(scaled_term < 0.0)
+            self._align_debug_reward_term_mixed_sign_steps[name] = (
+                self._align_debug_reward_term_mixed_sign_steps.get(name, 0.0) + float(bool(mixed_sign))
+            )
 
     def _print_alignment_debug(self, it: int) -> None:
         if not hasattr(self, "_align_debug_steps") or self._align_debug_steps == 0:
@@ -435,6 +578,10 @@ class RoboDuetAutomaticRunner:
 
         leg_steps = float(max(self._align_debug_leg_control_steps, 1))
         action_clip_steps = float(max(self._align_debug_action_clip_steps, 1))
+        reward_steps = float(max(self._align_debug_reward_steps, 1))
+        reward_dog = self._align_debug_reward_scalar_sums.get("reward_dog_scaled", 0.0) / reward_steps
+        reward_linear = self._align_debug_reward_scalar_sums.get("reward_dog_linear_scaled", 0.0) / reward_steps
+        torque_term = self._align_debug_reward_term_scaled_mean_sums.get("torques", 0.0) / reward_steps
         print(
             "[roboduet-debug] "
             f"it={it} ep_len={mean_episode_length:.6g} "
@@ -445,6 +592,9 @@ class RoboDuetAutomaticRunner:
             f"tau_diff={self._align_debug_leg_torque_target_diff_abs_mean_sum / leg_steps:.6g} "
             f"tau_applied={self._align_debug_leg_applied_torque_abs_mean_sum / leg_steps:.6g} "
             f"tau_clip={self._align_debug_leg_torque_clip_abs_mean_sum / leg_steps:.6g} "
+            f"tau2_target={self._align_debug_leg_torque_target_l2_sum / leg_steps:.6g} "
+            f"tau2_up_like={self._align_debug_upstream_like_torques_l2_sum / leg_steps:.6g} "
+            f"rew={reward_dog:.6g} rew_linear={reward_linear:.6g} rew_torque={torque_term:.6g} "
             f"raw_act={self._align_debug_dog_raw_action_abs_mean_sum / action_clip_steps:.6g} "
             f"raw_act_max={self._align_debug_dog_raw_action_abs_max:.6g} "
             f"done={term_on_done}",
@@ -503,6 +653,65 @@ class RoboDuetAutomaticRunner:
             writer.add_scalar("RoboDuet/effective_arm_action_abs_max", effective_arm_action_abs_max, it)
             writer.add_scalar("RoboDuet/stage1_command_pitch_roll_abs_mean", cmd_pitch_roll_abs_mean, it)
             writer.add_scalar("RoboDuet/stage1_command_velocity_abs_mean", cmd_velocity_abs_mean, it)
+            leg_steps = float(max(self._align_debug_leg_control_steps, 1))
+            reward_steps = float(max(self._align_debug_reward_steps, 1))
+            writer.add_scalar("RoboDuetDiag/leg_torque_target_l2", self._align_debug_leg_torque_target_l2_sum / leg_steps, it)
+            writer.add_scalar("RoboDuetDiag/leg_applied_torque_l2", self._align_debug_leg_applied_torque_l2_sum / leg_steps, it)
+            writer.add_scalar("RoboDuetDiag/arm_position_target_l2", self._align_debug_arm_position_target_l2_sum / leg_steps, it)
+            writer.add_scalar(
+                "RoboDuetDiag/upstream_like_torques_l2",
+                self._align_debug_upstream_like_torques_l2_sum / leg_steps,
+                it,
+            )
+            for scalar_name, scalar_sum in self._align_debug_reward_scalar_sums.items():
+                writer.add_scalar(f"RoboDuetDiag/reward_scalar/{scalar_name}", scalar_sum / reward_steps, it)
+            reward_diag_terms = (
+                "tracking_lin_vel",
+                "tracking_ang_vel",
+                "tracking_contacts_shaped_force",
+                "tracking_contacts_shaped_vel",
+                "loco_energy",
+                "torques",
+                "dof_acc",
+                "action_rate",
+                "action_smoothness_1",
+                "action_smoothness_2",
+                "feet_slip",
+                "collision",
+            )
+            for reward_name in reward_diag_terms:
+                if reward_name not in self._align_debug_reward_term_scaled_mean_sums:
+                    continue
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_scaled_mean/{reward_name}",
+                    self._align_debug_reward_term_scaled_mean_sums[reward_name] / reward_steps,
+                    it,
+                )
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_abs_mean/{reward_name}",
+                    self._align_debug_reward_term_abs_mean_sums[reward_name] / reward_steps,
+                    it,
+                )
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_neg_frac/{reward_name}",
+                    self._align_debug_reward_term_neg_frac_sums[reward_name] / reward_steps,
+                    it,
+                )
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_pos_frac/{reward_name}",
+                    self._align_debug_reward_term_pos_frac_sums[reward_name] / reward_steps,
+                    it,
+                )
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_batch_sign/{reward_name}",
+                    self._align_debug_reward_term_batch_sign_sums[reward_name] / reward_steps,
+                    it,
+                )
+                writer.add_scalar(
+                    f"RoboDuetDiag/reward_term_mixed_sign/{reward_name}",
+                    self._align_debug_reward_term_mixed_sign_steps[reward_name] / reward_steps,
+                    it,
+                )
             if len(self.arm_rewbuffer) > 0:
                 writer.add_scalar("Train/mean_arm_reward", statistics.mean(self.arm_rewbuffer), it)
                 if getattr(self.logger, "logger_type", "tensorboard") != "wandb":
@@ -616,52 +825,59 @@ class RoboDuetAutomaticRunner:
             self._log_roboduet_scalars(it)
 
             if self.log_dir is not None and it % int(self.cfg["save_interval"]) == 0:
-                self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                self.save(it=it, save_arm=bool(self._command_term().switch_open))
 
         if self.log_dir is not None:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.save(it=self.current_learning_iteration, save_arm=bool(self._command_term().switch_open))
         self.logger.stop_logging_writer()
 
-    def save(self, path: str, infos: dict | None = None) -> None:
-        save_dict = {
-            "dog_model_state_dict": self.dog_model.state_dict(),
-            "arm_model_state_dict": self.arm_model.state_dict(),
-            "iter": self.current_learning_iteration,
-            "infos": infos,
-        }
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(save_dict, path)
-        self.logger.save_model(path, self.current_learning_iteration)
-
-        if self.log_dir is not None:
-            dog_dir = os.path.join(self.log_dir, "checkpoints_dog")
-            arm_dir = os.path.join(self.log_dir, "checkpoints_arm")
-            os.makedirs(dog_dir, exist_ok=True)
-            os.makedirs(arm_dir, exist_ok=True)
-            torch.save(
-                self.dog_model.state_dict(), os.path.join(dog_dir, f"ac_weights_{self.current_learning_iteration:06d}.pt")
-            )
-            torch.save(self.dog_model.state_dict(), os.path.join(dog_dir, "ac_weights_last_dog.pt"))
-            torch.save(
-                self.arm_model.state_dict(), os.path.join(arm_dir, f"ac_weights_{self.current_learning_iteration:06d}.pt")
-            )
-            torch.save(self.arm_model.state_dict(), os.path.join(arm_dir, "ac_weights_last_arm.pt"))
-            if self.export_deploy_models:
-                self._save_deploy_models()
-
-    def _save_deploy_models(self) -> None:
+    def save(self, it: int | None = None, save_arm: bool | None = None) -> None:
+        """Save RoboDuet checkpoints with upstream `auto_train` directory semantics."""
         if self.log_dir is None:
             return
+        save_iteration = self.current_learning_iteration if it is None else int(it)
+        should_save_arm = bool(self._command_term().switch_open) if save_arm is None else bool(save_arm)
+        self._save_dog_checkpoint(save_iteration)
+        if should_save_arm:
+            self._save_arm_checkpoint(save_iteration)
 
+    def _save_dog_checkpoint(self, it: int) -> None:
+        dog_dir = os.path.join(self.log_dir, "checkpoints_dog")
+        os.makedirs(dog_dir, exist_ok=True)
+        torch.save(self.dog_model.state_dict(), os.path.join(dog_dir, f"ac_weights_{it:06d}.pt"))
+        torch.save(self.dog_model.state_dict(), os.path.join(dog_dir, "ac_weights_last_dog.pt"))
+        if self.export_deploy_models:
+            self._save_dog_deploy_model()
+
+    def _save_arm_checkpoint(self, it: int) -> None:
+        arm_dir = os.path.join(self.log_dir, "checkpoints_arm")
+        os.makedirs(arm_dir, exist_ok=True)
+        torch.save(self.arm_model.state_dict(), os.path.join(arm_dir, f"ac_weights_{it:06d}.pt"))
+        torch.save(self.arm_model.state_dict(), os.path.join(arm_dir, "ac_weights_last_arm.pt"))
+        if self.export_deploy_models:
+            self._save_arm_deploy_models()
+
+    def _deploy_model_dir(self) -> str | None:
+        if self.log_dir is None:
+            return None
         deploy_dir = os.path.join(self.log_dir, "deploy_model")
         os.makedirs(deploy_dir, exist_ok=True)
+        return deploy_dir
 
+    def _save_dog_deploy_model(self) -> None:
+        deploy_dir = self._deploy_model_dir()
+        if deploy_dir is None:
+            return
         # 保持与上游 `auto_train` 相同的 deploy_model 文件名，方便直接复用后处理脚本。
         dog_adaptation = copy.deepcopy(self.dog_model.adaptation_module).to("cpu")
         torch.jit.script(dog_adaptation).save(os.path.join(deploy_dir, "adaptation_module_latest_dog.jit"))
         dog_body = copy.deepcopy(self.dog_model.actor_body).to("cpu")
         torch.jit.script(dog_body).save(os.path.join(deploy_dir, "body_latest_dog.jit"))
 
+    def _save_arm_deploy_models(self) -> None:
+        deploy_dir = self._deploy_model_dir()
+        if deploy_dir is None:
+            return
         arm_adaptation = copy.deepcopy(self.arm_model.adaptation_module).to("cpu")
         torch.jit.script(arm_adaptation).save(os.path.join(deploy_dir, "adaptation_module_latest_arm.jit"))
         arm_body = copy.deepcopy(self.arm_model.actor_body).to("cpu")
@@ -678,15 +894,44 @@ class RoboDuetAutomaticRunner:
     ) -> dict | None:
         del load_cfg
         loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
-        if "dog_model_state_dict" in loaded_dict:
-            self.dog_model.load_state_dict(loaded_dict["dog_model_state_dict"], strict=strict)
-            self.arm_model.load_state_dict(loaded_dict["arm_model_state_dict"], strict=strict)
+        print(f"[ROBODUET LOAD] path={path}")
+        print(f"[ROBODUET LOAD] object_type={type(loaded_dict).__name__} strict={strict} map_location={map_location}")
+        if isinstance(loaded_dict, dict):
+            top_keys = [str(key) for key in list(loaded_dict.keys())[:12]]
+            print(f"[ROBODUET LOAD] top_key_count={len(loaded_dict)} top_keys={top_keys}")
+
+        if isinstance(loaded_dict, dict) and "dog_model_state_dict" in loaded_dict:
+            print("[ROBODUET LOAD] branch=combined_robotlab_checkpoint")
+            dog_state_dict = loaded_dict["dog_model_state_dict"]
+            arm_state_dict = loaded_dict["arm_model_state_dict"]
+            self._print_state_dict_debug("dog", dog_state_dict, self.dog_model)
+            self._print_state_dict_debug("arm", arm_state_dict, self.arm_model)
+            dog_load_result = self.dog_model.load_state_dict(dog_state_dict, strict=strict)
+            arm_load_result = self.arm_model.load_state_dict(arm_state_dict, strict=strict)
+            self._print_load_result("dog", dog_load_result)
+            self._print_load_result("arm", arm_load_result)
             self.current_learning_iteration = int(loaded_dict.get("iter", 0))
             self.inference_policy.reset()
+            self._last_load_debug = {
+                "path": path,
+                "branch": "combined_robotlab_checkpoint",
+                "iter": self.current_learning_iteration,
+            }
             return loaded_dict.get("infos")
-        # backward compatible fallback: dog-only or arm-only raw checkpoints
-        self.dog_model.load_state_dict(loaded_dict, strict=strict)
+
+        if not isinstance(loaded_dict, dict):
+            raise TypeError(
+                f"Unsupported RoboDuet checkpoint object from {path}: {type(loaded_dict).__name__}. "
+                "Expected a RobotLab combined checkpoint dict or a raw dog state_dict."
+            )
+
+        # backward compatible fallback: dog-only raw checkpoint, matching upstream `checkpoints_dog/ac_weights_*.pt`.
+        print("[ROBODUET LOAD] branch=raw_dog_state_dict")
+        self._print_state_dict_debug("dog", loaded_dict, self.dog_model)
+        dog_load_result = self.dog_model.load_state_dict(loaded_dict, strict=strict)
+        self._print_load_result("dog", dog_load_result)
         self.inference_policy.reset()
+        self._last_load_debug = {"path": path, "branch": "raw_dog_state_dict", "iter": self.current_learning_iteration}
         return None
 
     def get_inference_policy(self, device: str | None = None):

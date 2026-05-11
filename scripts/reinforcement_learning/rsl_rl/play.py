@@ -140,10 +140,31 @@ def _print_go2arm_termination_reasons(extras: dict) -> None:
         print(f"[TERMINATION env{env_id}] {state}: {reasons}")
 
 
-def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int) -> None:
-    """Print one compact Go2Arm action snapshot for play-time debugging."""
+def _fmt_tensor(values: torch.Tensor, max_items: int = 12) -> list[float]:
+    values = values.detach().flatten().cpu()
+    return [round(float(x), 4) for x in values[:max_items].tolist()]
+
+
+def _tensor_stats(values: torch.Tensor) -> str:
+    values = values.detach().float().flatten().cpu()
+    if values.numel() == 0:
+        return "numel=0"
+    return (
+        f"numel={int(values.numel())} mean={float(values.mean().item()):.5g} "
+        f"std={float(values.std(unbiased=False).item()):.5g} "
+        f"norm={float(values.norm().item()):.5g} min={float(values.min().item()):.5g} "
+        f"max={float(values.max().item()):.5g}"
+    )
+
+
+def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs: dict[str, torch.Tensor] | None = None) -> None:
+    """Print one compact Go2Arm action/control snapshot for play-time debugging."""
     robot = env.unwrapped.scene["robot"]
     action_manager = env.unwrapped.action_manager
+    try:
+        action_term = action_manager.get_term("joint_pos")
+    except KeyError:
+        action_term = None
 
     effective_action = getattr(env.unwrapped, "_go2arm_effective_action", None)
     current_action = action_manager.action[0].detach().cpu()
@@ -153,36 +174,106 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int) -> N
     else:
         effective_action = current_action
     prev_action = action_manager.prev_action[0].detach().cpu()
+
+    leg_joint_ids = getattr(action_term, "_leg_joint_ids", None) if action_term is not None else None
+    arm_joint_ids = getattr(action_term, "_arm_joint_ids", None) if action_term is not None else None
+    if torch.is_tensor(leg_joint_ids):
+        leg_joint_ids_cpu = leg_joint_ids.detach().cpu().long()
+    else:
+        leg_joint_ids_cpu = torch.arange(12, dtype=torch.long)
+    if torch.is_tensor(arm_joint_ids):
+        arm_joint_ids_cpu = arm_joint_ids.detach().cpu().long()
+    else:
+        arm_joint_ids_cpu = torch.arange(max(0, robot.data.joint_pos.shape[1] - 6), robot.data.joint_pos.shape[1], dtype=torch.long)
+
     joint_pos = robot.data.joint_pos[0].detach().cpu()
+    joint_vel = robot.data.joint_vel[0].detach().cpu()
     default_joint_pos = robot.data.default_joint_pos[0].detach().cpu()
+    joint_delta = joint_pos - default_joint_pos
+    leg_joint_delta = joint_delta[leg_joint_ids_cpu]
+    leg_joint_vel = joint_vel[leg_joint_ids_cpu]
+    arm_joint_delta = joint_delta[arm_joint_ids_cpu]
+    arm_joint_pos = joint_pos[arm_joint_ids_cpu]
+
+    leg_position_target = getattr(action_term, "_leg_position_target", None) if action_term is not None else None
+    if torch.is_tensor(leg_position_target):
+        leg_target_delta = leg_position_target[0].detach().cpu() - default_joint_pos[leg_joint_ids_cpu]
+    else:
+        leg_target_delta = torch.zeros_like(leg_joint_delta)
+
+    leg_torque_target = getattr(env.unwrapped, "_go2arm_leg_torque_target", None)
+    if torch.is_tensor(leg_torque_target):
+        leg_torque = leg_torque_target[0].detach().cpu()[leg_joint_ids_cpu]
+    else:
+        leg_torque = torch.zeros_like(leg_joint_delta)
+    applied_torque = robot.data.applied_torque[0].detach().cpu()[leg_joint_ids_cpu]
+
     root_pos_w = robot.data.root_pos_w[0].detach().cpu()
     root_quat_w = robot.data.root_quat_w[0].detach().cpu()
+    root_lin_vel_b = getattr(robot.data, "root_lin_vel_b", None)
+    root_ang_vel_b = getattr(robot.data, "root_ang_vel_b", None)
+    if torch.is_tensor(root_lin_vel_b):
+        root_lin_vel_b = root_lin_vel_b[0].detach().cpu()
+    else:
+        root_lin_vel_b = torch.zeros(3)
+    if torch.is_tensor(root_ang_vel_b):
+        root_ang_vel_b = root_ang_vel_b[0].detach().cpu()
+    else:
+        root_ang_vel_b = torch.zeros(3)
+
     ee_idx = robot.body_names.index("link6")
     ee_pos_w = robot.data.body_pos_w[0, ee_idx].detach().cpu()
     ee_quat_w = robot.data.body_quat_w[0, ee_idx].detach().cpu()
     ee_pos_b, _ = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
     ee_pos_b = ee_pos_b.detach().cpu()
 
-    joint_delta = joint_pos - default_joint_pos
-    arm_action = current_action[-6:]
-    effective_arm_action = effective_action[-6:]
+    command_text = "unavailable"
+    try:
+        command_term = env.unwrapped.command_manager.get_term("roboduet")
+        raw_dog_command = command_term.commands_dog[0].detach().cpu()
+        scaled_dog_command = (command_term.commands_dog[0] * command_term.commands_scale_dog[0]).detach().cpu()
+        clock_inputs = command_term.clock_inputs[0].detach().cpu()
+        command_text = (
+            f"switch_open={bool(command_term.switch_open)} "
+            f"dog_cmd={_fmt_tensor(raw_dog_command, 5)} dog_cmd_scaled={_fmt_tensor(scaled_dog_command, 5)} "
+            f"clock={_fmt_tensor(clock_inputs, 4)}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        command_text = f"error={type(exc).__name__}: {exc}"
+
+    dog_obs_text = "unavailable"
+    if isinstance(obs, dict) and "dog_policy" in obs:
+        dog_obs = obs["dog_policy"][0].detach().cpu()
+        dog_obs_text = (
+            f"stats({_tensor_stats(dog_obs)}) "
+            f"head={_fmt_tensor(dog_obs[:12], 12)} tail={_fmt_tensor(dog_obs[-12:], 12)}"
+        )
+
+    policy_dog_action = policy_action[:12]
+    exec_dog_action = current_action[:12]
+    effective_dog_action = effective_action[:12]
     policy_arm_action = policy_action[-6:]
-    arm_joint_delta = joint_delta[-6:]
-    arm_joint_pos = joint_pos[-6:]
+    effective_arm_action = effective_action[-6:]
+    arm_action = current_action[-6:]
 
     print(
-        f"[GO2ARM PLAY step={step}] "
-        f"policy_norm={float(policy_action.norm().item()):.3f} "
-        f"exec_norm={float(current_action.norm().item()):.3f} "
-        f"prev_norm={float(prev_action.norm().item()):.3f} "
-        f"base_w={[round(float(x), 3) for x in root_pos_w.tolist()]} "
-        f"ee_w={[round(float(x), 3) for x in ee_pos_w.tolist()]} "
-        f"ee_b={[round(float(x), 3) for x in ee_pos_b.tolist()]} "
-        f"policy_arm={[round(float(x), 3) for x in policy_arm_action.tolist()]} "
-        f"exec_arm={[round(float(x), 3) for x in effective_arm_action.tolist()]} "
-        f"masked_arm={[round(float(x), 3) for x in arm_action.tolist()]} "
-        f"arm_joint_delta={[round(float(x), 3) for x in arm_joint_delta.tolist()]} "
-        f"arm_joint_pos={[round(float(x), 3) for x in arm_joint_pos.tolist()]}"
+        f"[GO2ARM PLAY step={step}] command {command_text}\n"
+        f"[GO2ARM PLAY step={step}] dog_obs {dog_obs_text}\n"
+        f"[GO2ARM PLAY step={step}] action "
+        f"policy_norm={float(policy_action.norm().item()):.5g} exec_norm={float(current_action.norm().item()):.5g} "
+        f"prev_norm={float(prev_action.norm().item()):.5g} "
+        f"policy_dog={_fmt_tensor(policy_dog_action, 12)} exec_dog={_fmt_tensor(exec_dog_action, 12)} "
+        f"effective_dog={_fmt_tensor(effective_dog_action, 12)} policy_arm={_fmt_tensor(policy_arm_action, 6)} "
+        f"exec_arm={_fmt_tensor(effective_arm_action, 6)} masked_arm={_fmt_tensor(arm_action, 6)}\n"
+        f"[GO2ARM PLAY step={step}] control "
+        f"leg_q_delta={_fmt_tensor(leg_joint_delta, 12)} leg_qd={_fmt_tensor(leg_joint_vel, 12)} "
+        f"leg_target_delta={_fmt_tensor(leg_target_delta, 12)} "
+        f"tau_target_norm={float(leg_torque.norm().item()):.5g} tau_applied_norm={float(applied_torque.norm().item()):.5g} "
+        f"tau_target={_fmt_tensor(leg_torque, 12)} tau_applied={_fmt_tensor(applied_torque, 12)}\n"
+        f"[GO2ARM PLAY step={step}] state "
+        f"base_w={_fmt_tensor(root_pos_w, 3)} lin_vel_b={_fmt_tensor(root_lin_vel_b, 3)} "
+        f"ang_vel_b={_fmt_tensor(root_ang_vel_b, 3)} ee_w={_fmt_tensor(ee_pos_w, 3)} ee_b={_fmt_tensor(ee_pos_b, 3)} "
+        f"arm_joint_delta={_fmt_tensor(arm_joint_delta, 6)} arm_joint_pos={_fmt_tensor(arm_joint_pos, 6)}"
     )
  
  
@@ -465,6 +556,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
+            pre_step_obs = obs
             if use_mean_action:
                 actions = policy.act_inference(obs)
             else:
@@ -473,7 +565,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, extras = env.step(actions)
             _print_go2arm_termination_reasons(extras)
             if trace_interval is not None and timestep % trace_interval == 0:
-                _print_go2arm_action_state(env, actions[0], trace_step)
+                _print_go2arm_action_state(env, actions[0], trace_step, pre_step_obs)
             trace_step += 1
             # reset recurrent states for episodes that have terminated
             if hasattr(policy, "reset"):
