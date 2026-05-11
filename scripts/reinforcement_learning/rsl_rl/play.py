@@ -64,6 +64,12 @@ parser.add_argument(
     help="Print Go2Arm action and joint state diagnostics during play.",
 )
 parser.add_argument(
+    "--stage1",
+    action="store_true",
+    default=False,
+    help="Keep Go2Arm/RoboDuet play in stage1 dog-only mode. By default play opens stage2.",
+)
+parser.add_argument(
     "--go2arm_dog_cmd",
     type=float,
     nargs=3,
@@ -293,6 +299,42 @@ def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
     return True
 
 
+def _configure_go2arm_stage2_play(env_cfg, agent_cfg) -> bool:
+    """Open RoboDuet stage2 by default and keep one fixed dog command for playback."""
+    roboduet_cfg = getattr(getattr(env_cfg, "commands", None), "roboduet", None)
+    if roboduet_cfg is None:
+        return False
+
+    if args_cli.go2arm_dog_cmd is None:
+        # Upstream keyboard play starts from a standing dog command unless the user drives it.
+        dog_cmd = (0.0, 0.0, 0.0)
+        dog_cmd_source = "default_zero"
+    else:
+        dog_cmd = tuple(float(value) for value in args_cli.go2arm_dog_cmd)
+        dog_cmd_source = "cli"
+    fixed_time_s = float(_GO2ARM_PLAY_FIXED_COMMAND_TIME_S)
+    stage2_switch_iteration = 0
+
+    roboduet_cfg.switch_iteration = stage2_switch_iteration
+    if hasattr(agent_cfg, "roboduet_disable_two_stage"):
+        agent_cfg.roboduet_disable_two_stage = True
+    if hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
+        agent_cfg.roboduet_stage_switch_iteration = stage2_switch_iteration
+    env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = stage2_switch_iteration
+
+    roboduet_cfg.fixed_play_dog_command = dog_cmd
+    roboduet_cfg.disable_play_resampling = True
+    roboduet_cfg.resampling_time_s = fixed_time_s
+    roboduet_cfg.resampling_time_range = (fixed_time_s, fixed_time_s)
+
+    print(
+        "[INFO] Go2Arm RoboDuet stage2 play command: "
+        f"source={dog_cmd_source}, dog(vx,vy,wz)={dog_cmd}, "
+        f"resampling_time_s={fixed_time_s:g}, switch_iteration={stage2_switch_iteration}."
+    )
+    return True
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -333,11 +375,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.roboduet_randomize_motor_strength = False
         env_cfg.roboduet_randomize_motor_offset = False
         env_cfg.enable_play_termination_reason_logging = True
-        # Keep arm disabled for stage1 dog-only playback.  The action term keeps
-        # joint1-6 deltas fixed for the duration of playback.
-        fixed_roboduet_play = _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg)
+        if args_cli.stage1:
+            fixed_roboduet_play = _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg)
+            play_stage = "stage1 dog-only"
+        else:
+            fixed_roboduet_play = _configure_go2arm_stage2_play(env_cfg, agent_cfg)
+            play_stage = "stage2 whole-body"
         print("[INFO] Go2Arm play override: disabled RoboDuet eval-time DR/disturbances; reset randomization is kept.")
-        print("[INFO] Go2Arm play override: kept stage1 arm-action freeze for dog-only playback.")
+        print(f"[INFO] Go2Arm play override: using {play_stage} mode.")
         if fixed_roboduet_play:
             print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time command resampling.")
     else:
