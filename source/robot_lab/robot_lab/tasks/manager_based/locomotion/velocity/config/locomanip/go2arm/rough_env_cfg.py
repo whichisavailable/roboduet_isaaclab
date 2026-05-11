@@ -129,7 +129,9 @@ PRETRAINED_REWARD_SCALES = {
     "action_rate": -0.01,
     "action_smoothness_1": -0.1,
     "action_smoothness_2": -0.1,
-    "torques": -1.0e-5,
+    "torques": -0.0001,
+    "dof_pos_limits": -10.0,
+    "raibert_heuristic": -10.0,
 }
 
 HYBRID_REWARD_SCALES = {
