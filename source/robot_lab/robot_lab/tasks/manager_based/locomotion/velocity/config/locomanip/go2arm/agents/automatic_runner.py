@@ -314,6 +314,44 @@ class RoboDuetAutomaticRunner:
             f"missing_preview={missing[:8]} unexpected_preview={unexpected[:8]}"
         )
 
+    @staticmethod
+    def _derive_companion_arm_checkpoint_path(dog_checkpoint_path: str) -> str | None:
+        dog_dir = os.path.basename(os.path.dirname(dog_checkpoint_path))
+        if dog_dir != "checkpoints_dog":
+            return None
+        run_dir = os.path.dirname(os.path.dirname(dog_checkpoint_path))
+        arm_dir = os.path.join(run_dir, "checkpoints_arm")
+        dog_name = os.path.basename(dog_checkpoint_path)
+        if dog_name == "ac_weights_last_dog.pt":
+            arm_name = "ac_weights_last_arm.pt"
+        elif dog_name.startswith("ac_weights_") and dog_name.endswith(".pt"):
+            arm_name = dog_name
+        else:
+            return None
+        return os.path.join(arm_dir, arm_name)
+
+    def _load_companion_arm_checkpoint(
+        self, dog_checkpoint_path: str, strict: bool = True, map_location: str | None = None
+    ) -> str | None:
+        arm_checkpoint_path = self._derive_companion_arm_checkpoint_path(dog_checkpoint_path)
+        if arm_checkpoint_path is None:
+            print("[ROBODUET LOAD] arm: no companion checkpoint inferred for this dog checkpoint path.")
+            return None
+        if not os.path.exists(arm_checkpoint_path):
+            print(
+                f"[ROBODUET LOAD] arm: companion checkpoint not found at {arm_checkpoint_path}. "
+                "This is expected for pure stage1 checkpoints before arm saving starts."
+            )
+            return None
+
+        print(f"[ROBODUET LOAD] arm_companion_path={arm_checkpoint_path}")
+        arm_loaded = torch.load(arm_checkpoint_path, weights_only=False, map_location=map_location)
+        arm_state_dict = self._extract_state_dict(arm_loaded, "arm_model_state_dict")
+        self._print_state_dict_debug("arm", arm_state_dict, self.arm_model)
+        arm_load_result = self.arm_model.load_state_dict(arm_state_dict, strict=strict)
+        self._print_load_result("arm", arm_load_result)
+        return arm_checkpoint_path
+
     def _load_pretrained_components(self) -> None:
         dog_checkpoint = self.cfg.get("roboduet_pretrained_dog_checkpoint")
         arm_checkpoint = self.cfg.get("roboduet_pretrained_arm_checkpoint")
@@ -925,13 +963,20 @@ class RoboDuetAutomaticRunner:
                 "Expected a RobotLab combined checkpoint dict or a raw dog state_dict."
             )
 
-        # backward compatible fallback: dog-only raw checkpoint, matching upstream `checkpoints_dog/ac_weights_*.pt`.
+        # backward compatible fallback: dog raw checkpoint, matching upstream `checkpoints_dog/ac_weights_*.pt`.
+        # When the dog checkpoint is in `checkpoints_dog/`, also load the paired arm checkpoint from `checkpoints_arm/`.
         print("[ROBODUET LOAD] branch=raw_dog_state_dict")
         self._print_state_dict_debug("dog", loaded_dict, self.dog_model)
         dog_load_result = self.dog_model.load_state_dict(loaded_dict, strict=strict)
         self._print_load_result("dog", dog_load_result)
+        arm_checkpoint_path = self._load_companion_arm_checkpoint(path, strict=strict, map_location=map_location)
         self.inference_policy.reset()
-        self._last_load_debug = {"path": path, "branch": "raw_dog_state_dict", "iter": self.current_learning_iteration}
+        self._last_load_debug = {
+            "path": path,
+            "arm_path": arm_checkpoint_path,
+            "branch": "raw_dog_state_dict",
+            "iter": self.current_learning_iteration,
+        }
         return None
 
     def get_inference_policy(self, device: str | None = None):

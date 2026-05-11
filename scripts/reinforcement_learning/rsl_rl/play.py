@@ -447,10 +447,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return
     elif args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
+    elif "go2arm" in task_name.lower():
+        # RoboDuet upstream saves latest policy weights as `ac_weights_last_dog.pt` and
+        # `ac_weights_last_arm.pt`.  Do not let the generic IsaacLab resolver pick stale
+        # root-level `model_*.pt` files or numbered `ac_weights_006000.pt` by default.
+        go2arm_checkpoint_pattern = agent_cfg.load_checkpoint
+        if go2arm_checkpoint_pattern is None or str(go2arm_checkpoint_pattern).startswith("model_"):
+            go2arm_checkpoint_pattern = "ac_weights_last_dog.pt"
+        resume_path = get_checkpoint_path(
+            log_root_path,
+            agent_cfg.load_run,
+            go2arm_checkpoint_pattern,
+            other_dirs=["checkpoints_dog"],
+        )
+        print(
+            "[INFO] Go2Arm play checkpoint override: using dog checkpoint under "
+            f"checkpoints_dog/ matching {go2arm_checkpoint_pattern!r}."
+        )
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
+    if "go2arm" in task_name.lower() and os.path.basename(log_dir) in {"checkpoints_dog", "checkpoints_arm"}:
+        log_dir = os.path.dirname(log_dir)
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -511,7 +530,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 导出策略到 jit / onnx。
     # 只要策略对象自己提供了 as_jit()/as_onnx()，就直接使用策略自带的导出包装。
     # 这样可以确保 go2arm 这类自定义 privileged teacher policy 走正确的导出语义。
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+    export_model_dir = os.path.join(log_dir, "exported")
     if getattr(policy_nn, "skip_generic_export", False):
         print("[INFO] Skipping generic play-time export for RoboDuet automatic policy. Use training-time deploy_model artifacts instead.")
     elif policy_nn is not None and hasattr(policy_nn, "as_jit") and hasattr(policy_nn, "as_onnx"):
