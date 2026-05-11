@@ -108,7 +108,7 @@ from isaaclab.envs import (
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import quat_apply
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -145,20 +145,8 @@ def _fmt_tensor(values: torch.Tensor, max_items: int = 12) -> list[float]:
     return [round(float(x), 4) for x in values[:max_items].tolist()]
 
 
-def _tensor_stats(values: torch.Tensor) -> str:
-    values = values.detach().float().flatten().cpu()
-    if values.numel() == 0:
-        return "numel=0"
-    return (
-        f"numel={int(values.numel())} mean={float(values.mean().item()):.5g} "
-        f"std={float(values.std(unbiased=False).item()):.5g} "
-        f"norm={float(values.norm().item()):.5g} min={float(values.min().item()):.5g} "
-        f"max={float(values.max().item()):.5g}"
-    )
-
-
 def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs: dict[str, torch.Tensor] | None = None) -> None:
-    """Print one compact Go2Arm action/control snapshot for play-time debugging."""
+    """Print only direction-relevant Go2Arm diagnostics for backwards-walking debugging."""
     robot = env.unwrapped.scene["robot"]
     action_manager = env.unwrapped.action_manager
     try:
@@ -166,52 +154,22 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
     except KeyError:
         action_term = None
 
-    effective_action = getattr(env.unwrapped, "_go2arm_effective_action", None)
     current_action = action_manager.action[0].detach().cpu()
     policy_action = policy_action.detach().cpu()
-    if effective_action is not None:
+    effective_action = getattr(env.unwrapped, "_go2arm_effective_action", None)
+    if torch.is_tensor(effective_action):
         effective_action = effective_action[0].detach().cpu()
     else:
         effective_action = current_action
-    prev_action = action_manager.prev_action[0].detach().cpu()
 
-    leg_joint_ids = getattr(action_term, "_leg_joint_ids", None) if action_term is not None else None
-    arm_joint_ids = getattr(action_term, "_arm_joint_ids", None) if action_term is not None else None
-    if torch.is_tensor(leg_joint_ids):
-        leg_joint_ids_cpu = leg_joint_ids.detach().cpu().long()
-    else:
-        leg_joint_ids_cpu = torch.arange(12, dtype=torch.long)
-    if torch.is_tensor(arm_joint_ids):
-        arm_joint_ids_cpu = arm_joint_ids.detach().cpu().long()
-    else:
-        arm_joint_ids_cpu = torch.arange(max(0, robot.data.joint_pos.shape[1] - 6), robot.data.joint_pos.shape[1], dtype=torch.long)
-
-    joint_pos = robot.data.joint_pos[0].detach().cpu()
-    joint_vel = robot.data.joint_vel[0].detach().cpu()
-    default_joint_pos = robot.data.default_joint_pos[0].detach().cpu()
-    joint_delta = joint_pos - default_joint_pos
-    leg_joint_delta = joint_delta[leg_joint_ids_cpu]
-    leg_joint_vel = joint_vel[leg_joint_ids_cpu]
-    arm_joint_delta = joint_delta[arm_joint_ids_cpu]
-    arm_joint_pos = joint_pos[arm_joint_ids_cpu]
-
-    leg_position_target = getattr(action_term, "_leg_position_target", None) if action_term is not None else None
-    if torch.is_tensor(leg_position_target):
-        leg_target_delta = leg_position_target[0].detach().cpu() - default_joint_pos[leg_joint_ids_cpu]
-    else:
-        leg_target_delta = torch.zeros_like(leg_joint_delta)
-
-    leg_torque_target = getattr(env.unwrapped, "_go2arm_leg_torque_target", None)
-    if torch.is_tensor(leg_torque_target):
-        leg_torque = leg_torque_target[0].detach().cpu()[leg_joint_ids_cpu]
-    else:
-        leg_torque = torch.zeros_like(leg_joint_delta)
-    applied_torque = robot.data.applied_torque[0].detach().cpu()[leg_joint_ids_cpu]
-
-    root_pos_w = robot.data.root_pos_w[0].detach().cpu()
     root_quat_w = robot.data.root_quat_w[0].detach().cpu()
+    root_lin_vel_w = getattr(robot.data, "root_lin_vel_w", None)
     root_lin_vel_b = getattr(robot.data, "root_lin_vel_b", None)
     root_ang_vel_b = getattr(robot.data, "root_ang_vel_b", None)
+    if torch.is_tensor(root_lin_vel_w):
+        root_lin_vel_w = root_lin_vel_w[0].detach().cpu()
+    else:
+        root_lin_vel_w = torch.zeros(3)
     if torch.is_tensor(root_lin_vel_b):
         root_lin_vel_b = root_lin_vel_b[0].detach().cpu()
     else:
@@ -221,27 +179,27 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
     else:
         root_ang_vel_b = torch.zeros(3)
 
-    ee_idx = robot.body_names.index("link6")
-    ee_pos_w = robot.data.body_pos_w[0, ee_idx].detach().cpu()
-    ee_quat_w = robot.data.body_quat_w[0, ee_idx].detach().cpu()
-    ee_pos_b, _ = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-    ee_pos_b = ee_pos_b.detach().cpu()
+    forward_w = quat_apply(root_quat_w.unsqueeze(0), torch.tensor([[1.0, 0.0, 0.0]])).squeeze(0)
+    forward_xy = forward_w[:2]
+    forward_xy_norm = torch.linalg.norm(forward_xy).clamp_min(1.0e-6)
+    forward_xy_unit = forward_xy / forward_xy_norm
+    speed_along_forward_w = torch.dot(root_lin_vel_w[:2], forward_xy_unit)
+    yaw_w = torch.atan2(forward_w[1], forward_w[0])
 
-    command_text = "unavailable"
+    cmd_raw = torch.zeros(5)
+    cmd_scaled = torch.zeros(5)
+    switch_open = False
     try:
         command_term = env.unwrapped.command_manager.get_term("roboduet")
-        raw_dog_command = command_term.commands_dog[0].detach().cpu()
-        scaled_dog_command = (command_term.commands_dog[0] * command_term.commands_scale_dog[0]).detach().cpu()
-        clock_inputs = command_term.clock_inputs[0].detach().cpu()
-        command_text = (
-            f"switch_open={bool(command_term.switch_open)} "
-            f"dog_cmd={_fmt_tensor(raw_dog_command, 5)} dog_cmd_scaled={_fmt_tensor(scaled_dog_command, 5)} "
-            f"clock={_fmt_tensor(clock_inputs, 4)}"
-        )
+        switch_open = bool(command_term.switch_open)
+        cmd_raw = command_term.commands_dog[0].detach().cpu()
+        cmd_scaled = (command_term.commands_dog[0] * command_term.commands_scale_dog[0]).detach().cpu()
     except Exception as exc:  # noqa: BLE001
-        command_text = f"error={type(exc).__name__}: {exc}"
+        print(f"[GO2ARM DIR step={step}] command_error={type(exc).__name__}: {exc}")
 
-    dog_obs_text = "unavailable"
+    obs_cmd = torch.full((5,), float("nan"))
+    obs_pg = torch.full((3,), float("nan"))
+    obs_rp = torch.full((2,), float("nan"))
     dog_obs_tensor = None
     if obs is not None:
         try:
@@ -250,39 +208,35 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
             dog_obs_tensor = None
     if torch.is_tensor(dog_obs_tensor):
         dog_obs = dog_obs_tensor[0].detach().cpu()
-        dog_obs_text = (
-            f"stats({_tensor_stats(dog_obs)}) "
-            f"pg={_fmt_tensor(dog_obs[0:3], 3)} q={_fmt_tensor(dog_obs[3:15], 12)} "
-            f"qd={_fmt_tensor(dog_obs[15:27], 12)} act={_fmt_tensor(dog_obs[27:39], 12)} "
-            f"cmd={_fmt_tensor(dog_obs[39:44], 5)} armcmd={_fmt_tensor(dog_obs[44:50], 6)} "
-            f"rp={_fmt_tensor(dog_obs[50:52], 2)} clock={_fmt_tensor(dog_obs[52:56], 4)}"
-        )
+        obs_pg = dog_obs[0:3]
+        obs_cmd = dog_obs[39:44]
+        obs_rp = dog_obs[50:52]
 
-    policy_dog_action = policy_action[:12]
-    exec_dog_action = current_action[:12]
-    effective_dog_action = effective_action[:12]
-    policy_arm_action = policy_action[-6:]
-    effective_arm_action = effective_action[-6:]
-    arm_action = current_action[-6:]
+    leg_torque_target = getattr(env.unwrapped, "_go2arm_leg_torque_target", None)
+    if torch.is_tensor(leg_torque_target):
+        tau_norm = float(leg_torque_target[0].detach().cpu().norm().item())
+    else:
+        tau_norm = 0.0
+    leg_position_target = getattr(action_term, "_leg_position_target", None) if action_term is not None else None
+    if torch.is_tensor(leg_position_target):
+        target_norm = float(leg_position_target[0].detach().cpu().norm().item())
+    else:
+        target_norm = 0.0
 
     print(
-        f"[GO2ARM PLAY step={step}] command {command_text}\n"
-        f"[GO2ARM PLAY step={step}] dog_obs {dog_obs_text}\n"
-        f"[GO2ARM PLAY step={step}] action "
-        f"policy_norm={float(policy_action.norm().item()):.5g} exec_norm={float(current_action.norm().item()):.5g} "
-        f"prev_norm={float(prev_action.norm().item()):.5g} "
-        f"policy_dog={_fmt_tensor(policy_dog_action, 12)} exec_dog={_fmt_tensor(exec_dog_action, 12)} "
-        f"effective_dog={_fmt_tensor(effective_dog_action, 12)} policy_arm={_fmt_tensor(policy_arm_action, 6)} "
-        f"exec_arm={_fmt_tensor(effective_arm_action, 6)} masked_arm={_fmt_tensor(arm_action, 6)}\n"
-        f"[GO2ARM PLAY step={step}] control "
-        f"leg_q_delta={_fmt_tensor(leg_joint_delta, 12)} leg_qd={_fmt_tensor(leg_joint_vel, 12)} "
-        f"leg_target_delta={_fmt_tensor(leg_target_delta, 12)} "
-        f"tau_target_norm={float(leg_torque.norm().item()):.5g} tau_applied_norm={float(applied_torque.norm().item()):.5g} "
-        f"tau_target={_fmt_tensor(leg_torque, 12)} tau_applied={_fmt_tensor(applied_torque, 12)}\n"
-        f"[GO2ARM PLAY step={step}] state "
-        f"base_w={_fmt_tensor(root_pos_w, 3)} lin_vel_b={_fmt_tensor(root_lin_vel_b, 3)} "
-        f"ang_vel_b={_fmt_tensor(root_ang_vel_b, 3)} ee_w={_fmt_tensor(ee_pos_w, 3)} ee_b={_fmt_tensor(ee_pos_b, 3)} "
-        f"arm_joint_delta={_fmt_tensor(arm_joint_delta, 6)} arm_joint_pos={_fmt_tensor(arm_joint_pos, 6)}"
+        f"[GO2ARM DIR step={step}] switch_open={switch_open} "
+        f"cmd_raw={_fmt_tensor(cmd_raw, 5)} cmd_obs={_fmt_tensor(obs_cmd, 5)} "
+        f"vel_b={_fmt_tensor(root_lin_vel_b, 3)} vel_w={_fmt_tensor(root_lin_vel_w, 3)} "
+        f"forward_xy={_fmt_tensor(forward_xy_unit, 2)} yaw_w={float(yaw_w.item()):.4f} "
+        f"v_forward_w={float(speed_along_forward_w.item()):.4f} "
+        f"cmd_x={float(cmd_raw[0].item()):.4f} vx_b={float(root_lin_vel_b[0].item()):.4f} "
+        f"backwards={(float(cmd_raw[0].item()) * float(root_lin_vel_b[0].item())) < -0.05}"
+    )
+    print(
+        f"[GO2ARM DIR step={step}] obs_pg={_fmt_tensor(obs_pg, 3)} obs_rp={_fmt_tensor(obs_rp, 2)} "
+        f"act_FL={_fmt_tensor(effective_action[0:3], 3)} act_FR={_fmt_tensor(effective_action[3:6], 3)} "
+        f"act_RL={_fmt_tensor(effective_action[6:9], 3)} act_RR={_fmt_tensor(effective_action[9:12], 3)} "
+        f"policy_norm={float(policy_action[:12].norm().item()):.4f} target_norm={target_norm:.4f} tau_norm={tau_norm:.4f}"
     )
  
  

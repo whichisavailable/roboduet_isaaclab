@@ -262,31 +262,9 @@ class RoboDuetAutomaticRunner:
         return loaded_obj
 
     @staticmethod
-    def _print_state_dict_debug(label: str, state_dict, model: nn.Module | None = None) -> None:
-        if not isinstance(state_dict, dict):
-            print(f"[ROBODUET LOAD] {label}: object_type={type(state_dict).__name__}, expected dict/state_dict.")
-            return
-
-        tensor_items = [(key, value) for key, value in state_dict.items() if torch.is_tensor(value)]
-        tensor_numel = sum(int(value.numel()) for _, value in tensor_items)
-        tensor_l2_sq = 0.0
-        tensor_abs_max = 0.0
-        for _, value in tensor_items:
-            value_f = value.detach().float()
-            if value_f.numel() == 0:
-                continue
-            tensor_l2_sq += float(torch.sum(value_f * value_f).item())
-            tensor_abs_max = max(tensor_abs_max, float(value_f.abs().max().item()))
-
-        first_keys = [str(key) for key in list(state_dict.keys())[:8]]
-        print(
-            f"[ROBODUET LOAD] {label}: state_keys={len(state_dict)} tensor_keys={len(tensor_items)} "
-            f"tensor_numel={tensor_numel} tensor_l2={tensor_l2_sq ** 0.5:.6g} "
-            f"tensor_abs_max={tensor_abs_max:.6g} first_keys={first_keys}"
-        )
-
-        if model is None:
-            return
+    def _state_dict_precheck(state_dict, model: nn.Module | None = None) -> tuple[int, int, int]:
+        if not isinstance(state_dict, dict) or model is None:
+            return 0, 0, 0
         model_state = model.state_dict()
         model_keys = list(model_state.keys())
         state_keys = set(state_dict.keys())
@@ -297,22 +275,14 @@ class RoboDuetAutomaticRunner:
             if key not in state_dict:
                 continue
             if torch.is_tensor(state_dict[key]) and tuple(state_dict[key].shape) != tuple(model_state[key].shape):
-                shape_mismatch.append((key, tuple(state_dict[key].shape), tuple(model_state[key].shape)))
-        print(
-            f"[ROBODUET LOAD] {label}: precheck missing={len(missing)} unexpected={len(unexpected)} "
-            f"shape_mismatch={len(shape_mismatch)} "
-            f"missing_preview={missing[:8]} unexpected_preview={unexpected[:8]} "
-            f"shape_mismatch_preview={shape_mismatch[:4]}"
-        )
+                shape_mismatch.append(key)
+        return len(missing), len(unexpected), len(shape_mismatch)
 
     @staticmethod
-    def _print_load_result(label: str, load_result) -> None:
+    def _load_result_counts(load_result) -> tuple[int, int]:
         missing = list(getattr(load_result, "missing_keys", []) or [])
         unexpected = list(getattr(load_result, "unexpected_keys", []) or [])
-        print(
-            f"[ROBODUET LOAD] {label}: load_state_dict missing={len(missing)} unexpected={len(unexpected)} "
-            f"missing_preview={missing[:8]} unexpected_preview={unexpected[:8]}"
-        )
+        return len(missing), len(unexpected)
 
     @staticmethod
     def _derive_companion_arm_checkpoint_path(dog_checkpoint_path: str) -> str | None:
@@ -344,12 +314,16 @@ class RoboDuetAutomaticRunner:
             )
             return None
 
-        print(f"[ROBODUET LOAD] arm_companion_path={arm_checkpoint_path}")
         arm_loaded = torch.load(arm_checkpoint_path, weights_only=False, map_location=map_location)
         arm_state_dict = self._extract_state_dict(arm_loaded, "arm_model_state_dict")
-        self._print_state_dict_debug("arm", arm_state_dict, self.arm_model)
+        pre_missing, pre_unexpected, pre_shape = self._state_dict_precheck(arm_state_dict, self.arm_model)
         arm_load_result = self.arm_model.load_state_dict(arm_state_dict, strict=strict)
-        self._print_load_result("arm", arm_load_result)
+        missing, unexpected = self._load_result_counts(arm_load_result)
+        print(
+            f"[ROBODUET LOAD] arm path={arm_checkpoint_path} "
+            f"precheck(missing={pre_missing}, unexpected={pre_unexpected}, shape={pre_shape}) "
+            f"load(missing={missing}, unexpected={unexpected})"
+        )
         return arm_checkpoint_path
 
     def _load_pretrained_components(self) -> None:
@@ -932,22 +906,23 @@ class RoboDuetAutomaticRunner:
     ) -> dict | None:
         del load_cfg
         loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
-        print(f"[ROBODUET LOAD] path={path}")
-        print(f"[ROBODUET LOAD] object_type={type(loaded_dict).__name__} strict={strict} map_location={map_location}")
-        if isinstance(loaded_dict, dict):
-            top_keys = [str(key) for key in list(loaded_dict.keys())[:12]]
-            print(f"[ROBODUET LOAD] top_key_count={len(loaded_dict)} top_keys={top_keys}")
 
         if isinstance(loaded_dict, dict) and "dog_model_state_dict" in loaded_dict:
-            print("[ROBODUET LOAD] branch=combined_robotlab_checkpoint")
             dog_state_dict = loaded_dict["dog_model_state_dict"]
             arm_state_dict = loaded_dict["arm_model_state_dict"]
-            self._print_state_dict_debug("dog", dog_state_dict, self.dog_model)
-            self._print_state_dict_debug("arm", arm_state_dict, self.arm_model)
+            dog_pre_missing, dog_pre_unexpected, dog_pre_shape = self._state_dict_precheck(dog_state_dict, self.dog_model)
+            arm_pre_missing, arm_pre_unexpected, arm_pre_shape = self._state_dict_precheck(arm_state_dict, self.arm_model)
             dog_load_result = self.dog_model.load_state_dict(dog_state_dict, strict=strict)
             arm_load_result = self.arm_model.load_state_dict(arm_state_dict, strict=strict)
-            self._print_load_result("dog", dog_load_result)
-            self._print_load_result("arm", arm_load_result)
+            dog_missing, dog_unexpected = self._load_result_counts(dog_load_result)
+            arm_missing, arm_unexpected = self._load_result_counts(arm_load_result)
+            print(
+                f"[ROBODUET LOAD] path={path} branch=combined "
+                f"dog_precheck=({dog_pre_missing},{dog_pre_unexpected},{dog_pre_shape}) "
+                f"dog_load=({dog_missing},{dog_unexpected}) "
+                f"arm_precheck=({arm_pre_missing},{arm_pre_unexpected},{arm_pre_shape}) "
+                f"arm_load=({arm_missing},{arm_unexpected})"
+            )
             self.current_learning_iteration = int(loaded_dict.get("iter", 0))
             self.inference_policy.reset()
             self._last_load_debug = {
@@ -965,10 +940,14 @@ class RoboDuetAutomaticRunner:
 
         # backward compatible fallback: dog raw checkpoint, matching upstream `checkpoints_dog/ac_weights_*.pt`.
         # When the dog checkpoint is in `checkpoints_dog/`, also load the paired arm checkpoint from `checkpoints_arm/`.
-        print("[ROBODUET LOAD] branch=raw_dog_state_dict")
-        self._print_state_dict_debug("dog", loaded_dict, self.dog_model)
+        dog_pre_missing, dog_pre_unexpected, dog_pre_shape = self._state_dict_precheck(loaded_dict, self.dog_model)
         dog_load_result = self.dog_model.load_state_dict(loaded_dict, strict=strict)
-        self._print_load_result("dog", dog_load_result)
+        dog_missing, dog_unexpected = self._load_result_counts(dog_load_result)
+        print(
+            f"[ROBODUET LOAD] path={path} branch=raw_dog "
+            f"dog_precheck=({dog_pre_missing},{dog_pre_unexpected},{dog_pre_shape}) "
+            f"dog_load=({dog_missing},{dog_unexpected})"
+        )
         arm_checkpoint_path = self._load_companion_arm_checkpoint(path, strict=strict, map_location=map_location)
         self.inference_policy.reset()
         self._last_load_debug = {
