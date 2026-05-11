@@ -47,6 +47,15 @@ parser.add_argument(
     default=None,
     help="Debug-only override for RoboDuet stage switch iteration. Leaves config defaults unchanged when unset.",
 )
+parser.add_argument(
+    "--roboduet_probe_dog_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Debug-only path to a RoboDuet dog actor-critic checkpoint. Loads it directly into the "
+        "RoboDuet automatic runner before training, without using standard --resume."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -119,6 +128,7 @@ from isaaclab.envs import (
     ManagerBasedRLEnvCfg,
     multi_agent_to_single_agent,
 )
+from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
 
@@ -222,6 +232,13 @@ def _install_go2arm_mani_phase_reset_hook(runner, agent_cfg) -> None:
         return original_act(*args, **kwargs)
 
     runner.alg.act = act_with_go2arm_mani_reset
+
+
+def _resolve_roboduet_probe_checkpoint(path: str) -> str:
+    expanded_path = os.path.abspath(os.path.expanduser(path))
+    if os.path.exists(expanded_path):
+        return expanded_path
+    return retrieve_file_path(path)
 
 
 def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
@@ -428,6 +445,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "[INFO] RoboDuet debug override: "
             f"roboduet_stage_switch_iteration={agent_cfg.roboduet_stage_switch_iteration}"
         )
+    roboduet_runner_class_name = (
+        "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner:"
+        "RoboDuetAutomaticRunner"
+    )
+    if args_cli.roboduet_probe_dog_checkpoint is not None:
+        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+            raise ValueError("--roboduet_probe_dog_checkpoint cannot be combined with --resume or Distillation.")
+        if agent_cfg.class_name != roboduet_runner_class_name:
+            raise ValueError("--roboduet_probe_dog_checkpoint is only valid for RoboDuetAutomaticRunner.")
     if int(agent_cfg.seed) == -1:
         agent_cfg.seed = int(torch.randint(0, 10000, (1,)).item())
         print(f"[INFO] RoboDuet random seed selected: {agent_cfg.seed}")
@@ -538,6 +564,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = runner_class(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
+    if args_cli.roboduet_probe_dog_checkpoint is not None:
+        probe_checkpoint_path = _resolve_roboduet_probe_checkpoint(args_cli.roboduet_probe_dog_checkpoint)
+        print(f"[INFO]: Loading RoboDuet probe dog checkpoint from: {probe_checkpoint_path}")
+        runner.load(probe_checkpoint_path, strict=True, map_location=agent_cfg.device)
     # load the checkpoint
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
@@ -550,10 +580,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env.close()
         return
 
-    if agent_cfg.class_name != (
-        "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner:"
-        "RoboDuetAutomaticRunner"
-    ):
+    if agent_cfg.class_name != roboduet_runner_class_name:
         _install_go2arm_mani_phase_reset_hook(runner, agent_cfg)
 
     # dump the configuration into log-directory
