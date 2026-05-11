@@ -242,11 +242,20 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
         command_text = f"error={type(exc).__name__}: {exc}"
 
     dog_obs_text = "unavailable"
-    if isinstance(obs, dict) and "dog_policy" in obs:
-        dog_obs = obs["dog_policy"][0].detach().cpu()
+    dog_obs_tensor = None
+    if obs is not None:
+        try:
+            dog_obs_tensor = obs["dog_policy"]
+        except (KeyError, TypeError, AttributeError):
+            dog_obs_tensor = None
+    if torch.is_tensor(dog_obs_tensor):
+        dog_obs = dog_obs_tensor[0].detach().cpu()
         dog_obs_text = (
             f"stats({_tensor_stats(dog_obs)}) "
-            f"head={_fmt_tensor(dog_obs[:12], 12)} tail={_fmt_tensor(dog_obs[-12:], 12)}"
+            f"pg={_fmt_tensor(dog_obs[0:3], 3)} q={_fmt_tensor(dog_obs[3:15], 12)} "
+            f"qd={_fmt_tensor(dog_obs[15:27], 12)} act={_fmt_tensor(dog_obs[27:39], 12)} "
+            f"cmd={_fmt_tensor(dog_obs[39:44], 5)} armcmd={_fmt_tensor(dog_obs[44:50], 6)} "
+            f"rp={_fmt_tensor(dog_obs[50:52], 2)} clock={_fmt_tensor(dog_obs[52:56], 4)}"
         )
 
     policy_dog_action = policy_action[:12]
@@ -358,13 +367,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.observations.dog_privileged.enable_corruption = False
         env_cfg.observations.arm_policy.enable_corruption = False
         env_cfg.observations.arm_privileged.enable_corruption = False
+        # Match upstream `load_env()` evaluation semantics: keep reset randomization,
+        # but disable domain randomization and external disturbances during play.
+        env_cfg.events.randomize_rigid_body_material = None
+        env_cfg.events.randomize_rigid_body_mass_base = None
+        env_cfg.events.randomize_rigid_body_mass_ee = None
         env_cfg.events.randomize_apply_external_force_torque_base = None
         env_cfg.events.randomize_apply_external_force_torque_ee = None
         env_cfg.events.randomize_push_robot = None
+        env_cfg.roboduet_randomize_gravity = False
+        env_cfg.roboduet_randomize_motor_strength = False
+        env_cfg.roboduet_randomize_motor_offset = False
         env_cfg.enable_play_termination_reason_logging = True
         # Keep arm disabled for stage1 dog-only playback.  The action term keeps
         # joint1-6 deltas fixed for the duration of playback.
         fixed_roboduet_play = _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg)
+        print("[INFO] Go2Arm play override: disabled RoboDuet eval-time DR/disturbances; reset randomization is kept.")
         print("[INFO] Go2Arm play override: kept stage1 arm-action freeze for dog-only playback.")
         if fixed_roboduet_play:
             print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time command resampling.")
