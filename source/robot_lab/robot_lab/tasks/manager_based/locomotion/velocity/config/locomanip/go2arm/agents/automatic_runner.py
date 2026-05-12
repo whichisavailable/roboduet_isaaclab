@@ -652,6 +652,33 @@ class RoboDuetAutomaticRunner:
         }
         return None
 
+    def load_dog_checkpoint(
+        self,
+        path: str,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict | None:
+        """Load only the dog actor-critic weights. Used by stage2 bootstrap in train.py."""
+        loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+        # Accept either a raw state_dict (upstream checkpoints_dog/ac_weights_*.pt)
+        # or a combined robotlab checkpoint that contains "dog_model_state_dict".
+        dog_state_dict = self._extract_state_dict(loaded_dict, "dog_model_state_dict")
+        if not isinstance(dog_state_dict, dict):
+            raise TypeError(
+                f"Unsupported dog checkpoint at {path}: {type(loaded_dict).__name__}. "
+                "Expected a raw state_dict or a dict with 'dog_model_state_dict'."
+            )
+        pre_missing, pre_unexpected, pre_shape = self._state_dict_precheck(dog_state_dict, self.dog_model)
+        load_result = self.dog_model.load_state_dict(dog_state_dict, strict=strict)
+        missing, unexpected = self._load_result_counts(load_result)
+        print(
+            f"[ROBODUET LOAD] path={path} branch=dog_only "
+            f"precheck=({pre_missing},{pre_unexpected},{pre_shape}) "
+            f"load=({missing},{unexpected})"
+        )
+        self.inference_policy.reset()
+        return loaded_dict.get("infos") if isinstance(loaded_dict, dict) else None
+
     def get_inference_policy(self, device: str | None = None):
         self.alg_dog.eval_mode()
         self.alg_arm.eval_mode()

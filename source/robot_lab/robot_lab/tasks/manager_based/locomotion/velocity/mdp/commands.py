@@ -863,6 +863,9 @@ class RoboDuetCommandCfg(CommandTermCfg):
     pitch_ee_range: tuple[float, float] = (-math.radians(60.0), math.radians(60.0))
     yaw_ee_range: tuple[float, float] = (-math.radians(75.0), math.radians(75.0))
     traj_time_range: tuple[float, float] = (2.0, 3.0)
+    arm_collision_lower_limits: tuple[float, float, float] = (-0.38, -0.16, -0.3)
+    arm_collision_upper_limits: tuple[float, float, float] = (0.3, 0.16, 0.10)
+    arm_underground_limit: float = -0.38
     gait_frequency: float = 3.0
     gait_duration: float = 0.5
     gait_kappa: float = 0.07
@@ -924,6 +927,9 @@ class RoboDuetCommand(CommandTerm):
         )
         self._curriculum.set_to(low=low, high=high)
         self.env_command_bins = np.zeros(self.num_envs, dtype=np.int64)
+        self.arm_collision_lower_limits = torch.tensor(cfg.arm_collision_lower_limits, device=self.device, dtype=torch.float32)
+        self.arm_collision_upper_limits = torch.tensor(cfg.arm_collision_upper_limits, device=self.device, dtype=torch.float32)
+        self.arm_underground_limit: float = cfg.arm_underground_limit
 
     @property
     def command(self) -> torch.Tensor:
@@ -1083,12 +1089,35 @@ class RoboDuetCommand(CommandTerm):
             max=float(self.cfg.limit_body_roll[1]),
         )
 
+    def _arm_lpy_to_local_xyz(self, lpy: torch.Tensor) -> torch.Tensor:
+        l, p, y = lpy[:, 0], lpy[:, 1], lpy[:, 2]
+        x = l * torch.cos(p) * torch.cos(y)
+        y_coord = l * torch.cos(p) * torch.sin(y)
+        z = l * torch.sin(p)
+        return torch.stack([x, y_coord, z], dim=-1)
+
+    def _arm_target_collision_mask(self, lpy: torch.Tensor) -> torch.Tensor:
+        xyz = self._arm_lpy_to_local_xyz(lpy)
+        in_box = torch.all(xyz < self.arm_collision_upper_limits, dim=-1) & torch.all(xyz > self.arm_collision_lower_limits, dim=-1)
+        underground = xyz[:, 2] < self.arm_underground_limit
+        return in_box | underground
+
     def _resample_arm_commands(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
             return
         self.commands_arm[env_ids, 0] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.l_range)
         self.commands_arm[env_ids, 1] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.p_range)
         self.commands_arm[env_ids, 2] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.y_range)
+        remaining = env_ids.clone()
+        for _ in range(10):
+            if remaining.numel() == 0:
+                break
+            bad = self._arm_target_collision_mask(self.commands_arm[remaining])
+            remaining = remaining[bad]
+            if remaining.numel() > 0:
+                self.commands_arm[remaining, 0] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.l_range)
+                self.commands_arm[remaining, 1] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.p_range)
+                self.commands_arm[remaining, 2] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.y_range)
         self.commands_arm_obs[env_ids, :3] = self.commands_arm[env_ids]
         roll = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.roll_ee_range)
         pitch = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.pitch_ee_range)

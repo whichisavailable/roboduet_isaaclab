@@ -288,8 +288,12 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "arm_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_ARM_JOINT_NAMES, preserve_order=True),
             "base_body_cfg": SceneEntityCfg("robot", body_names=[GO2ARM_BASE_BODY_NAME]),
             "ee_body_cfg": SceneEntityCfg("robot", body_names=["link6"]),
-            "manip_weight_lpy": 3.0,
-            "manip_weight_rpy": 1.0,
+            "manip_weight_lpy_start": 4.0,
+            "manip_weight_lpy_end": 3.0,
+            "manip_weight_rpy_start": 0.0,
+            "manip_weight_rpy_end": 1.0,
+            "manip_weight_keep_sum_constant": True,
+            "manip_weight_transition_iters": 5000,
         }
         for reward_term_name in HYBRID_REWARD_SCALES:
             setattr(

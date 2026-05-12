@@ -2937,8 +2937,12 @@ def _compute_roboduet_reward_state(
     arm_joint_cfg: SceneEntityCfg,
     base_body_cfg: SceneEntityCfg,
     ee_body_cfg: SceneEntityCfg,
-    manip_weight_lpy: float,
-    manip_weight_rpy: float,
+    manip_weight_lpy_start: float = 4.0,
+    manip_weight_lpy_end: float = 3.0,
+    manip_weight_rpy_start: float = 0.0,
+    manip_weight_rpy_end: float = 1.0,
+    manip_weight_keep_sum_constant: bool = True,
+    manip_weight_transition_iters: int = 5000,
 ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
     del base_body_cfg
     command_sums = _ensure_roboduet_logging_buffers(env, hybrid_scales)
@@ -3063,7 +3067,19 @@ def _compute_roboduet_reward_state(
     ).unsqueeze(0)
     lpy_error = torch.sum(torch.abs(current_lpy - term.commands_arm_obs[:, :3]) / lpy_range, dim=1)
     rpy_error = torch.sum(torch.abs(current_abg - term.target_abg) / rpy_range, dim=1)
-    metrics["arm_manip_commands_tracking_combine"] = torch.exp(-(manip_weight_lpy * lpy_error + manip_weight_rpy * rpy_error))
+    _step = int(getattr(env, "common_step_counter", 0))
+    _cur_iter = float(_step) / float(max(term.cfg.steps_per_iteration, 1))
+    _arm_stage_iter = max(0.0, _cur_iter - float(term.cfg.switch_iteration))
+    if manip_weight_transition_iters <= 0:
+        _alpha = 1.0
+    else:
+        _alpha = max(0.0, min(1.0, _arm_stage_iter / float(manip_weight_transition_iters)))
+    _manip_weight_lpy = manip_weight_lpy_start + (manip_weight_lpy_end - manip_weight_lpy_start) * _alpha
+    if manip_weight_keep_sum_constant:
+        _manip_weight_rpy = (manip_weight_lpy_start + manip_weight_rpy_start) - _manip_weight_lpy
+    else:
+        _manip_weight_rpy = manip_weight_rpy_start + (manip_weight_rpy_end - manip_weight_rpy_start) * _alpha
+    metrics["arm_manip_commands_tracking_combine"] = torch.exp(-(_manip_weight_lpy * lpy_error + _manip_weight_rpy * rpy_error))
     metrics["vis_manip_commands_tracking_lpy"] = torch.exp(-lpy_error)
     metrics["vis_manip_commands_tracking_rpy"] = torch.exp(-rpy_error)
     metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)

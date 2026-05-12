@@ -56,6 +56,15 @@ parser.add_argument(
         "RoboDuet automatic runner before training, without using standard --resume."
     ),
 )
+parser.add_argument(
+    "--roboduet_stage2_dog_checkpoint",
+    type=str,
+    default=None,
+    help=(
+        "Path to an explicit RoboDuet dog actor-critic checkpoint. Loads only this dog checkpoint, "
+        "sets the runner iteration to 10000, syncs the env counters, and starts training directly in stage2."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -234,7 +243,7 @@ def _install_go2arm_mani_phase_reset_hook(runner, agent_cfg) -> None:
     runner.alg.act = act_with_go2arm_mani_reset
 
 
-def _resolve_roboduet_probe_checkpoint(path: str) -> str:
+def _resolve_roboduet_checkpoint_path(path: str) -> str:
     expanded_path = os.path.abspath(os.path.expanduser(path))
     if os.path.exists(expanded_path):
         return expanded_path
@@ -297,6 +306,40 @@ def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
     print(
         "[INFO] Synced env common_step_counter for resume: "
         f"iteration={current_iteration}, step={raw_env.common_step_counter}"
+    )
+
+
+def _sync_roboduet_stage2_bootstrap_to_env(
+    runner,
+    env,
+    agent_cfg,
+    dog_checkpoint_path: str,
+    stage2_iteration: int = 10000,
+) -> None:
+    """Make a dog-only load behave like the dog has already completed stage1 training."""
+    runner.current_learning_iteration = int(stage2_iteration)
+    _sync_resume_iteration_to_env(runner, env, agent_cfg)
+
+    raw_env = getattr(env, "unwrapped", env)
+    command_term = None
+    if hasattr(raw_env, "command_manager"):
+        try:
+            command_term = raw_env.command_manager.get_term("roboduet")
+        except KeyError:
+            command_term = None
+    if command_term is not None and not bool(command_term.switch_open):
+        raise RuntimeError(
+            "RoboDuet stage2 dog bootstrap failed to open stage2 after syncing env counters: "
+            f"switch_iteration={command_term.cfg.switch_iteration}, "
+            f"common_step_counter={raw_env.common_step_counter}."
+        )
+
+    print(
+        "[INFO] RoboDuet stage2 dog bootstrap ready: "
+        f"dog_checkpoint={dog_checkpoint_path}, "
+        f"iteration={runner.current_learning_iteration}, "
+        f"step={getattr(raw_env, 'common_step_counter', 'n/a')}, "
+        f"switch_open={getattr(command_term, 'switch_open', 'n/a')}"
     )
 
 
@@ -388,13 +431,17 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
         agent_cfg, "roboduet_pretrained_arm_checkpoint", None
     ):
         expected_switch_iteration = 2000
+    current_iteration = float(getattr(raw_env, "common_step_counter", 0)) / float(
+        max(getattr(command_term.cfg, "steps_per_iteration", 1), 1)
+    )
     add_check("command_switch_iteration", int(command_term.cfg.switch_iteration), expected_switch_iteration)
+    expected_action_fixed_until_iteration = 0 if current_iteration >= float(expected_switch_iteration) else expected_switch_iteration
     add_check(
         "action_fixed_until_iteration",
         int(action_term.cfg.fixed_delta_action_until_iteration),
-        expected_switch_iteration,
+        expected_action_fixed_until_iteration,
     )
-    expected_initial_switch_open = expected_switch_iteration <= 0
+    expected_initial_switch_open = current_iteration >= float(expected_switch_iteration)
     add_check("initial_switch_open", bool(command_term.switch_open), expected_initial_switch_open)
 
     active_terms = tuple(raw_env.termination_manager.active_terms)
@@ -406,10 +453,13 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
         if term_name == "reverse_termination" and not command_term.switch_open:
             continue
         effective_non_timeout_terms.append(term_name)
+    expected_effective_non_timeout_terms = (
+        tuple(effective_non_timeout_terms) if command_term.switch_open else ("base_height_termination",)
+    )
     add_check(
         "stage1_effective_non_timeout_terminations",
         tuple(effective_non_timeout_terms),
-        ("base_height_termination",),
+        expected_effective_non_timeout_terms,
     )
 
     print("\n[INFO] RoboDuet alignment check results:")
@@ -435,6 +485,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if (
+        args_cli.roboduet_stage2_dog_checkpoint is not None
+        and args_cli.roboduet_debug_stage_switch_iteration is not None
+    ):
+        raise ValueError(
+            "--roboduet_stage2_dog_checkpoint cannot be combined with "
+            "--roboduet_debug_stage_switch_iteration because stage2 bootstrap fixes the switch at iteration 10000."
+        )
     if args_cli.roboduet_debug_stage_switch_iteration is not None:
         if not hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
             raise ValueError(
@@ -449,6 +507,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner:"
         "RoboDuetAutomaticRunner"
     )
+    if args_cli.roboduet_stage2_dog_checkpoint is not None:
+        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+            raise ValueError("--roboduet_stage2_dog_checkpoint cannot be combined with --resume or Distillation.")
+        if args_cli.roboduet_probe_dog_checkpoint is not None:
+            raise ValueError("--roboduet_stage2_dog_checkpoint cannot be combined with --roboduet_probe_dog_checkpoint.")
+        if agent_cfg.class_name != roboduet_runner_class_name:
+            raise ValueError("--roboduet_stage2_dog_checkpoint is only valid for RoboDuetAutomaticRunner.")
+        if not hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
+            raise ValueError("--roboduet_stage2_dog_checkpoint requires a RoboDuet automatic runner config.")
+        agent_cfg.roboduet_disable_two_stage = False
+        agent_cfg.roboduet_stage_switch_iteration = 10000
+        print(
+            "[INFO] RoboDuet stage2 dog bootstrap requested: "
+            "roboduet_stage_switch_iteration=10000, current_learning_iteration will be set to 10000."
+        )
     if args_cli.roboduet_probe_dog_checkpoint is not None:
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
             raise ValueError("--roboduet_probe_dog_checkpoint cannot be combined with --resume or Distillation.")
@@ -564,8 +637,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = runner_class(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
+    if args_cli.roboduet_stage2_dog_checkpoint is not None:
+        stage2_dog_checkpoint_path = _resolve_roboduet_checkpoint_path(args_cli.roboduet_stage2_dog_checkpoint)
+        print(f"[INFO]: Loading RoboDuet stage2 bootstrap dog checkpoint from: {stage2_dog_checkpoint_path}")
+        if not hasattr(runner, "load_dog_checkpoint"):
+            raise ValueError("--roboduet_stage2_dog_checkpoint requires runner.load_dog_checkpoint().")
+        runner.load_dog_checkpoint(stage2_dog_checkpoint_path, strict=True, map_location=agent_cfg.device)
+        _sync_roboduet_stage2_bootstrap_to_env(runner, env, agent_cfg, stage2_dog_checkpoint_path)
     if args_cli.roboduet_probe_dog_checkpoint is not None:
-        probe_checkpoint_path = _resolve_roboduet_probe_checkpoint(args_cli.roboduet_probe_dog_checkpoint)
+        probe_checkpoint_path = _resolve_roboduet_checkpoint_path(args_cli.roboduet_probe_dog_checkpoint)
         print(f"[INFO]: Loading RoboDuet probe dog checkpoint from: {probe_checkpoint_path}")
         runner.load(probe_checkpoint_path, strict=True, map_location=agent_cfg.device)
     # load the checkpoint
