@@ -3317,8 +3317,12 @@ def roboduet_weighted_reward_term(
     arm_joint_cfg: SceneEntityCfg,
     base_body_cfg: SceneEntityCfg,
     ee_body_cfg: SceneEntityCfg,
-    manip_weight_lpy: float,
-    manip_weight_rpy: float,
+    manip_weight_lpy_start: float = 4.0,
+    manip_weight_lpy_end: float = 3.0,
+    manip_weight_rpy_start: float = 0.0,
+    manip_weight_rpy_end: float = 1.0,
+    manip_weight_keep_sum_constant: bool = True,
+    manip_weight_transition_iters: int = 5000,
 ) -> torch.Tensor:
     reward_state = _compute_roboduet_reward_state(
         env=env,
@@ -3339,8 +3343,12 @@ def roboduet_weighted_reward_term(
         arm_joint_cfg=arm_joint_cfg,
         base_body_cfg=base_body_cfg,
         ee_body_cfg=ee_body_cfg,
-        manip_weight_lpy=manip_weight_lpy,
-        manip_weight_rpy=manip_weight_rpy,
+        manip_weight_lpy_start=manip_weight_lpy_start,
+        manip_weight_lpy_end=manip_weight_lpy_end,
+        manip_weight_rpy_start=manip_weight_rpy_start,
+        manip_weight_rpy_end=manip_weight_rpy_end,
+        manip_weight_keep_sum_constant=manip_weight_keep_sum_constant,
+        manip_weight_transition_iters=manip_weight_transition_iters,
     )
     weighted_term = reward_state["weighted_terms"][reward_term_name]
     if reward_term_name in _ROBODUET_LOG_ONLY_TERMS:
@@ -3367,8 +3375,12 @@ def roboduet_total_reward_adjustment(
     arm_joint_cfg: SceneEntityCfg,
     base_body_cfg: SceneEntityCfg,
     ee_body_cfg: SceneEntityCfg,
-    manip_weight_lpy: float,
-    manip_weight_rpy: float,
+    manip_weight_lpy_start: float = 4.0,
+    manip_weight_lpy_end: float = 3.0,
+    manip_weight_rpy_start: float = 0.0,
+    manip_weight_rpy_end: float = 1.0,
+    manip_weight_keep_sum_constant: bool = True,
+    manip_weight_transition_iters: int = 5000,
 ) -> torch.Tensor:
     reward_state = _compute_roboduet_reward_state(
         env=env,
@@ -3389,8 +3401,12 @@ def roboduet_total_reward_adjustment(
         arm_joint_cfg=arm_joint_cfg,
         base_body_cfg=base_body_cfg,
         ee_body_cfg=ee_body_cfg,
-        manip_weight_lpy=manip_weight_lpy,
-        manip_weight_rpy=manip_weight_rpy,
+        manip_weight_lpy_start=manip_weight_lpy_start,
+        manip_weight_lpy_end=manip_weight_lpy_end,
+        manip_weight_rpy_start=manip_weight_rpy_start,
+        manip_weight_rpy_end=manip_weight_rpy_end,
+        manip_weight_keep_sum_constant=manip_weight_keep_sum_constant,
+        manip_weight_transition_iters=manip_weight_transition_iters,
     )
     return reward_state["total_adjustment"]
 
@@ -3416,8 +3432,12 @@ class RoboDuetReward(ManagerTermBase):
         arm_joint_cfg: SceneEntityCfg,
         base_body_cfg: SceneEntityCfg,
         ee_body_cfg: SceneEntityCfg,
-        manip_weight_lpy: float,
-        manip_weight_rpy: float,
+        manip_weight_lpy_start: float = 4.0,
+        manip_weight_lpy_end: float = 3.0,
+        manip_weight_rpy_start: float = 0.0,
+        manip_weight_rpy_end: float = 1.0,
+        manip_weight_keep_sum_constant: bool = True,
+        manip_weight_transition_iters: int = 5000,
     ) -> torch.Tensor:
         reward_state = _compute_roboduet_reward_state(
             env=env,
@@ -3438,7 +3458,11 @@ class RoboDuetReward(ManagerTermBase):
             arm_joint_cfg=arm_joint_cfg,
             base_body_cfg=base_body_cfg,
             ee_body_cfg=ee_body_cfg,
-            manip_weight_lpy=manip_weight_lpy,
-            manip_weight_rpy=manip_weight_rpy,
+            manip_weight_lpy_start=manip_weight_lpy_start,
+            manip_weight_lpy_end=manip_weight_lpy_end,
+            manip_weight_rpy_start=manip_weight_rpy_start,
+            manip_weight_rpy_end=manip_weight_rpy_end,
+            manip_weight_keep_sum_constant=manip_weight_keep_sum_constant,
+            manip_weight_transition_iters=manip_weight_transition_iters,
         )
         return reward_state["reward_dog"]
