@@ -1049,7 +1049,9 @@ class RoboDuetCommand(CommandTerm):
                 if key not in self.command_sums:
                     continue
                 task_rewards.append(self.command_sums[key][env_ids] / ep_len)
-                success_thresholds.append(self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key])
+                success_thresholds.append(
+                    self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key] * float(self._env.step_dt)
+                )
             self._curriculum.update(
                 old_bins,
                 task_rewards,

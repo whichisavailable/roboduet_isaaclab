@@ -10,6 +10,7 @@ import statistics
 from collections import deque
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -427,6 +428,20 @@ class RoboDuetAutomaticRunner:
                     writer.add_scalar(
                         "Train/mean_arm_reward/time", statistics.mean(self.arm_rewbuffer), int(self.logger.tot_time)
                     )
+            term = self._command_term()
+            curriculum = term._curriculum
+            weights = curriculum.weights
+            total_weight = weights.sum()
+            if total_weight > 0:
+                probs = weights / total_weight
+                x_vel_grid = curriculum.grid[0]
+                yaw_vel_grid = curriculum.grid[2]
+                writer.add_scalar("Curriculum/x_vel_mean", float(np.dot(probs, x_vel_grid)), it)
+                writer.add_scalar("Curriculum/yaw_vel_mean", float(np.dot(probs, yaw_vel_grid)), it)
+                writer.add_scalar("Curriculum/active_bins", int(np.count_nonzero(weights)), it)
+                writer.add_scalar("Curriculum/max_weight", float(weights.max()), it)
+                x_var = float(np.dot(probs, x_vel_grid**2) - np.dot(probs, x_vel_grid) ** 2)
+                writer.add_scalar("Curriculum/x_vel_std", float(np.sqrt(max(x_var, 0.0))), it)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if init_at_random_ep_len:
