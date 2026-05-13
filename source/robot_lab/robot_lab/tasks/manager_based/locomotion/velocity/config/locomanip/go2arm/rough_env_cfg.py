@@ -140,6 +140,7 @@ HYBRID_REWARD_SCALES = {
     "tracking_ang_vel": 0.25,
     "orientation_heuristic": -2.0,
     "orientation_control": -10.0,
+    "raibert_heuristic": -0.0,
     "arm_manip_commands_tracking_combine": 1.0,
     "vis_manip_commands_tracking_lpy": 1.0,
     "vis_manip_commands_tracking_rpy": 1.0,

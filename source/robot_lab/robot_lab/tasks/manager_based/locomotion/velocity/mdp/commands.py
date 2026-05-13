@@ -856,7 +856,7 @@ class RoboDuetCommandCfg(CommandTermCfg):
         "tracking_contacts_shaped_force": 4.0,
         "tracking_contacts_shaped_vel": 4.0,
     }
-    l_range: tuple[float, float] = (0.3, 0.77)
+    l_range: tuple[float, float] = (0.3, 0.7)
     p_range: tuple[float, float] = (-math.pi * 0.45, math.pi * 0.45)
     y_range: tuple[float, float] = (-math.pi / 2.0, math.pi / 2.0)
     roll_ee_range: tuple[float, float] = (-math.pi * 0.45, math.pi * 0.45)

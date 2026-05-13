@@ -120,7 +120,7 @@ UNITREE_Go2Arm_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
         merge_fixed_joints=False,
-        replace_cylinders_with_capsules=False,
+        replace_cylinders_with_capsules=True,
         asset_path=(
             f"{ISAACLAB_ASSETS_DATA_DIR}/Robots/unitree/go2arm_description/urdf/"
             "go2_piper_description_mjc_NoGripper.urdf"

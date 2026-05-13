@@ -891,15 +891,11 @@ def _ground_height_under_base(env: ManagerBasedEnv) -> torch.Tensor:
 def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     ee_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    ee_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
     base_pos_w, base_quat_w = roboduet_base_pose_w(asset)
     yaw_quat = _body_yaw_quat(base_quat_w)
-    grasper_offset_b = torch.tensor([0.1, 0.0, 0.0], device=env.device, dtype=ee_pos_w.dtype).expand(env.num_envs, 3)
-    grasper_offset_w = quat_apply(ee_quat_w, grasper_offset_b)
-    grasper_world = ee_pos_w + grasper_offset_w
-    delta_world = grasper_world - base_pos_w
+    delta_world = ee_pos_w - base_pos_w
     delta_yaw = quat_apply_inverse(yaw_quat, delta_world)
-    delta_yaw[:, 2] = grasper_world[:, 2] - _ground_height_under_base(env) - 0.38
+    delta_yaw[:, 2] = ee_pos_w[:, 2] - _ground_height_under_base(env) - 0.38
     l = torch.linalg.norm(delta_yaw, dim=1)
     p = torch.atan2(delta_yaw[:, 2], torch.sqrt(torch.clamp(delta_yaw[:, 0] ** 2 + delta_yaw[:, 1] ** 2, min=1.0e-8)))
     yaw = torch.atan2(delta_yaw[:, 1], delta_yaw[:, 0])

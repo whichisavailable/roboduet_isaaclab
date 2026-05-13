@@ -384,6 +384,29 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
     )
 
     action_joint_names = tuple(getattr(action_term, "_joint_names", ()))
+    arm_joint_ids = getattr(raw_env, "_go2arm_arm_joint_ids", None)
+    if arm_joint_ids is None:
+        arm_joint_ids, _ = robot.find_joints([r"^joint[1-6]$"], preserve_order=True)
+    arm_joint_names = tuple(all_joint_names[int(joint_id)] for joint_id in arm_joint_ids)
+    expected_action_joint_names = leg_joint_names + arm_joint_names
+    leg_action_ids_raw = getattr(action_term, "_leg_action_ids", None)
+    arm_action_ids_raw = getattr(action_term, "_arm_action_ids", None)
+    leg_action_ids = (
+        tuple(int(joint_id) for joint_id in leg_action_ids_raw.detach().cpu().tolist())
+        if isinstance(leg_action_ids_raw, torch.Tensor)
+        else tuple(int(joint_id) for joint_id in (leg_action_ids_raw or ()))
+    )
+    arm_action_ids = (
+        tuple(int(joint_id) for joint_id in arm_action_ids_raw.detach().cpu().tolist())
+        if isinstance(arm_action_ids_raw, torch.Tensor)
+        else tuple(int(joint_id) for joint_id in (arm_action_ids_raw or ()))
+    )
+    leg_action_names = tuple(action_joint_names[int(joint_id)] for joint_id in leg_action_ids)
+    arm_action_names = tuple(action_joint_names[int(joint_id)] for joint_id in arm_action_ids)
+    add_check("action_joint_names_leg_then_arm", action_joint_names, expected_action_joint_names)
+    add_check("leg_action_ids_resolve_leg_names", leg_action_names, leg_joint_names)
+    add_check("arm_action_ids_resolve_arm_names", arm_action_names, arm_joint_names)
+
     fixed_joint_ids = getattr(action_term, "_fixed_delta_action_joint_ids", None)
     if fixed_joint_ids is not None:
         if isinstance(fixed_joint_ids, torch.Tensor):
@@ -461,6 +484,39 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
         tuple(effective_non_timeout_terms),
         expected_effective_non_timeout_terms,
     )
+
+    with torch.inference_mode():
+        zero_action = torch.zeros((env.num_envs, int(env.num_actions)), device=raw_env.device)
+        env.step(zero_action)
+    reward_dog = getattr(raw_env, "_roboduet_reward_dog", None)
+    reward_arm = getattr(raw_env, "_roboduet_reward_arm", None)
+    add_check(
+        "zero_step_reward_dog_finite",
+        bool(torch.isfinite(reward_dog).all().item()) if torch.is_tensor(reward_dog) else None,
+        True,
+    )
+    add_check(
+        "zero_step_reward_arm_finite",
+        bool(torch.isfinite(reward_arm).all().item()) if torch.is_tensor(reward_arm) else None,
+        True,
+    )
+
+    leg_asset_joint_ids = tuple(int(joint_id) for joint_id in leg_joint_ids)
+    arm_asset_joint_ids = tuple(int(joint_id) for joint_id in arm_joint_ids)
+    print("\n[INFO] RoboDuet joint/action index diagnostics:")
+    print(f"  robot.joint_names       = {all_joint_names!r}")
+    print(f"  action_term._joint_names = {action_joint_names!r}")
+    print(f"  leg_asset_joint_ids     = {leg_asset_joint_ids!r} -> {leg_joint_names!r}")
+    print(f"  arm_asset_joint_ids     = {arm_asset_joint_ids!r} -> {arm_joint_names!r}")
+    print(f"  leg_action_ids          = {leg_action_ids!r} -> {leg_action_names!r}")
+    print(f"  arm_action_ids          = {arm_action_ids!r} -> {arm_action_names!r}")
+    if all_joint_names != action_joint_names:
+        print(
+            "  [INFO] asset joint order differs from action tensor order; "
+            "action-based rewards must index by action ids, not asset joint ids."
+        )
+    else:
+        print("  [INFO] asset joint order and action tensor order are identical.")
 
     print("\n[INFO] RoboDuet alignment check results:")
     failed = []

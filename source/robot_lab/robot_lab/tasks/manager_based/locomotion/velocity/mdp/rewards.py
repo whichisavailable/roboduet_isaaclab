@@ -2792,6 +2792,29 @@ def _effective_action_history(env: ManagerBasedRLEnv) -> tuple[torch.Tensor, tor
     )
 
 
+def _roboduet_action_ids_for_joint_cfg(
+    env: ManagerBasedRLEnv, robot: Articulation, joint_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Map asset joint ids to the corresponding columns in the RoboDuet action tensor."""
+    action_term = env.action_manager.get_term("joint_pos")
+    action_joint_names = tuple(getattr(action_term, "_joint_names", ()))
+    if not action_joint_names:
+        raise RuntimeError("RoboDuet joint_pos action term does not expose resolved joint names.")
+
+    joint_ids = joint_cfg.joint_ids
+    if isinstance(joint_ids, slice):
+        joint_ids = list(range(*joint_ids.indices(robot.num_joints)))
+    joint_names = tuple(robot.joint_names[int(joint_id)] for joint_id in joint_ids)
+    missing = tuple(joint_name for joint_name in joint_names if joint_name not in action_joint_names)
+    if missing:
+        raise RuntimeError(f"RoboDuet action tensor is missing joints required by reward cfg: {missing}")
+    return torch.tensor(
+        [action_joint_names.index(joint_name) for joint_name in joint_names],
+        dtype=torch.long,
+        device=env.device,
+    )
+
+
 def action_smoothness_first_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Penalty on first-order action changes."""
     # 一阶平滑项：惩罚当前动作和上一步动作之间的跳变。
@@ -2956,6 +2979,8 @@ def _compute_roboduet_reward_state(
     scales = hybrid_scales if term.switch_open else pretrained_scales
     reward_names = tuple(hybrid_scales.keys())
     robot: Articulation = env.scene["robot"]
+    leg_action_ids = _roboduet_action_ids_for_joint_cfg(env, robot, leg_joint_cfg)
+    arm_action_ids = _roboduet_action_ids_for_joint_cfg(env, robot, arm_joint_cfg)
     reward_dt = float(env.step_dt)
     reward_dog_linear = torch.zeros(env.num_envs, device=env.device)
     reward_arm_linear = torch.zeros(env.num_envs, device=env.device)
@@ -3083,9 +3108,10 @@ def _compute_roboduet_reward_state(
     metrics["vis_manip_commands_tracking_lpy"] = torch.exp(-lpy_error)
     metrics["vis_manip_commands_tracking_rpy"] = torch.exp(-rpy_error)
     metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
+    joint_pos_target = getattr(env, "_go2arm_joint_pos_target", torch.zeros_like(env.action_manager.action))
     metrics["arm_energy"] = torch.sum(
         torch.square(
-            robot.data.applied_torque[:, arm_joint_cfg.joint_ids] * robot.data.joint_vel[:, arm_joint_cfg.joint_ids]
+            joint_pos_target[:, arm_action_ids] * robot.data.joint_vel[:, arm_joint_cfg.joint_ids]
         ),
         dim=1,
     )
@@ -3096,13 +3122,8 @@ def _compute_roboduet_reward_state(
         ),
         dim=1,
     )
-    metrics["arm_action_rate"] = torch.sum(
-        torch.square(
-            env.action_manager.prev_action[:, arm_joint_cfg.joint_ids]
-            - env.action_manager.action[:, arm_joint_cfg.joint_ids]
-        ),
-        dim=1,
-    )
+    action, prev_action, prev_prev_action = _effective_action_history(env)
+    metrics["arm_action_rate"] = torch.sum(torch.square(prev_action[:, arm_action_ids] - action[:, arm_action_ids]), dim=1)
     plan_actions = getattr(env, "plan_actions", torch.zeros(env.num_envs, 2, device=env.device))
     last_plan_actions = getattr(env, "last_plan_actions", torch.zeros_like(plan_actions))
     metrics["arm_control_limits"] = (
@@ -3123,45 +3144,40 @@ def _compute_roboduet_reward_state(
         ),
         dim=1,
     )
-    metrics["action_rate"] = torch.sum(
-        torch.square(
-            env.action_manager.prev_action[:, leg_joint_cfg.joint_ids]
-            - env.action_manager.action[:, leg_joint_cfg.joint_ids]
-        ),
-        dim=1,
-    )
-    joint_pos_target = getattr(env, "_go2arm_joint_pos_target", torch.zeros_like(env.action_manager.action))
+    metrics["action_rate"] = torch.sum(torch.square(prev_action[:, leg_action_ids] - action[:, leg_action_ids]), dim=1)
     last_joint_pos_target = getattr(env, "_go2arm_last_joint_pos_target", torch.zeros_like(joint_pos_target))
     last_last_joint_pos_target = getattr(env, "_go2arm_last_last_joint_pos_target", torch.zeros_like(joint_pos_target))
-    leg_valid = (env.action_manager.prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
-    leg_valid_2 = (env.action_manager.prev_prev_action[:, leg_joint_cfg.joint_ids] != 0.0).float()
-    arm_valid = (env.action_manager.prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
-    arm_valid_2 = (env.action_manager.prev_prev_action[:, arm_joint_cfg.joint_ids] != 0.0).float()
+    if prev_prev_action is None:
+        prev_prev_action = torch.zeros_like(prev_action)
+    leg_valid = (prev_action[:, leg_action_ids] != 0.0).float()
+    leg_valid_2 = (prev_prev_action[:, leg_action_ids] != 0.0).float()
+    arm_valid = (prev_action[:, arm_action_ids] != 0.0).float()
+    arm_valid_2 = (prev_prev_action[:, arm_action_ids] != 0.0).float()
     metrics["action_smoothness_1"] = torch.sum(
-        torch.square(joint_pos_target[:, leg_joint_cfg.joint_ids] - last_joint_pos_target[:, leg_joint_cfg.joint_ids])
+        torch.square(joint_pos_target[:, leg_action_ids] - last_joint_pos_target[:, leg_action_ids])
         * leg_valid,
         dim=1,
     )
     metrics["action_smoothness_2"] = torch.sum(
         torch.square(
-            joint_pos_target[:, leg_joint_cfg.joint_ids]
-            - 2.0 * last_joint_pos_target[:, leg_joint_cfg.joint_ids]
-            + last_last_joint_pos_target[:, leg_joint_cfg.joint_ids]
+            joint_pos_target[:, leg_action_ids]
+            - 2.0 * last_joint_pos_target[:, leg_action_ids]
+            + last_last_joint_pos_target[:, leg_action_ids]
         )
         * leg_valid
         * leg_valid_2,
         dim=1,
     )
     metrics["arm_action_smoothness_1"] = torch.sum(
-        torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids] - last_joint_pos_target[:, arm_joint_cfg.joint_ids])
+        torch.square(joint_pos_target[:, arm_action_ids] - last_joint_pos_target[:, arm_action_ids])
         * arm_valid,
         dim=1,
     )
     metrics["arm_action_smoothness_2"] = torch.sum(
         torch.square(
-            joint_pos_target[:, arm_joint_cfg.joint_ids]
-            - 2.0 * last_joint_pos_target[:, arm_joint_cfg.joint_ids]
-            + last_last_joint_pos_target[:, arm_joint_cfg.joint_ids]
+            joint_pos_target[:, arm_action_ids]
+            - 2.0 * last_joint_pos_target[:, arm_action_ids]
+            + last_last_joint_pos_target[:, arm_action_ids]
         )
         * arm_valid
         * arm_valid_2,
@@ -3178,7 +3194,7 @@ def _compute_roboduet_reward_state(
     else:
         leg_torque_for_reward = robot.data.applied_torque[:, leg_joint_cfg.joint_ids]
     metrics["torques"] = torch.sum(torch.square(leg_torque_for_reward), dim=1) + torch.sum(
-        torch.square(joint_pos_target[:, arm_joint_cfg.joint_ids]),
+        torch.square(joint_pos_target[:, arm_action_ids]),
         dim=1,
     )
     metrics["hip_action_l2"] = torch.sum(torch.square(roboduet_current_action(env)[:, [0, 3, 6, 9]]), dim=1)
