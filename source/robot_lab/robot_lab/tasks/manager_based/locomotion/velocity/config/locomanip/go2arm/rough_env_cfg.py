@@ -162,13 +162,13 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     reward_log_interval_iterations: int = 1
     reward_log_steps_per_iteration: int = 24
     enable_play_termination_reason_logging: bool = False
-    roboduet_randomize_gravity: bool = True
+    roboduet_randomize_gravity: bool = False
     roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)
     roboduet_gravity_interval_s: float = 8.0
     roboduet_gravity_impulse_duration: float = 0.99
-    roboduet_randomize_motor_strength: bool = True
+    roboduet_randomize_motor_strength: bool = False
     roboduet_motor_strength_range: tuple[float, float] = (0.9, 1.1)
-    roboduet_randomize_motor_offset: bool = True
+    roboduet_randomize_motor_offset: bool = False
     roboduet_motor_offset_range: tuple[float, float] = (-0.02, 0.02)
     roboduet_motor_randomization_interval_s: float = 4.0
     episode_log_key_prefixes: tuple[str, ...] = (
@@ -190,9 +190,11 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.sim.gravity = (0.0, 0.0, -9.81)
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.merge_fixed_joints = True
-        self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
-        self.scene.robot.spawn.articulation_props.solver_position_iteration_count = 4
-        self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 1
+        # Match upstream `roboduet_go2piper/scripts/auto_train.py` effective asset options:
+        # fixed joints collapsed, self-collision disabled, and the higher default solver iterations kept.
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = False
+        self.scene.robot.spawn.articulation_props.solver_position_iteration_count = 8
+        self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 4
         # Upstream scripts/auto_train.py forces Cfg.terrain.mesh_type = "plane".
         # Keep the rough task ID, but make its effective terrain semantics match auto_train.
         self.scene.terrain.terrain_type = "plane"
