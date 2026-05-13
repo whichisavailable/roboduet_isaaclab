@@ -68,19 +68,23 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
         "leg_hip_thigh": IdealPDActuatorCfg(
             joint_names_expr=[r".*_hip_joint", r".*_thigh_joint"],
             effort_limit=23.7,
+            effort_limit_sim=23.7,
             velocity_limit=30.1,
             # RoboDuet `control_type=M` computes leg PD torques in the task action term.
-            # Keep the IsaacLab explicit actuator as a pure effort pass-through with static clipping.
+            # Match upstream go2piper effective leg torque clipping:
+            # explicit-actuator internal clip = 23.7, PhysX max force = 23.7.
             stiffness=0.0,
             damping=0.0,
             friction=0.0,
         ),
         "leg_calf": IdealPDActuatorCfg(
             joint_names_expr=[r".*_calf_joint"],
-            effort_limit=45.43,
+            effort_limit=23.7,
+            effort_limit_sim=23.7,
             velocity_limit=15.70,
             # RoboDuet `control_type=M` computes leg PD torques in the task action term.
-            # Keep the IsaacLab explicit actuator as a pure effort pass-through with static clipping.
+            # Match upstream go2piper effective leg torque clipping:
+            # explicit-actuator internal clip = 23.7, PhysX max force = 23.7.
             stiffness=0.0,
             damping=0.0,
             friction=0.0,
@@ -119,7 +123,7 @@ UNITREE_Go2Arm_USD_CFG = ArticulationCfg(
 UNITREE_Go2Arm_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
-        merge_fixed_joints=False,
+        merge_fixed_joints=True,
         replace_cylinders_with_capsules=True,
         asset_path=(
             f"{ISAACLAB_ASSETS_DATA_DIR}/Robots/unitree/go2arm_description/urdf/"
