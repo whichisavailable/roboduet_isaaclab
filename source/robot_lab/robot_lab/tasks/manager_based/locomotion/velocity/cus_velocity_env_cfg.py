@@ -80,9 +80,7 @@ GO2ARM_BASE_BODY_NAME = "base"
 # 四个足端 body 名称。
 GO2ARM_FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 GO2ARM_FOOT_NAMES = list(GO2ARM_FOOT_BODY_NAMES)
-GO2ARM_CONTACT_SENSOR_PRIM_PATH = (
-    "{ENV_REGEX_NS}/Robot/.*(?:FL_foot|FR_foot|RL_foot|RR_foot|(?:FL|FR|RL|RR)_(?:thigh|calf)(?:_link)?|base|base_link|link[1-6])$"
-)
+GO2ARM_CONTACT_SENSOR_PRIM_PATH = "{ENV_REGEX_NS}/Robot/.*"
 # Upstream RoboDuet can monitor whole-body illegal contacts.  This port keeps a cheaper subset:
 # dog trunk base, arm mount, lower legs, and arm links.  base_link is monitored as an arm mount
 # contact body, not as the upstream dog base/reference frame.
@@ -206,7 +204,7 @@ class MySceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path=GO2ARM_CONTACT_SENSOR_PRIM_PATH,
         history_length=3,
-        track_air_time=False,
+        track_air_time=True,
     )
     # go2arm 精确足端接触专用 filtered sensor。
     # 每个 sensor 只绑定一个 foot body，避免把整机多 body contact sensor 直接拿去做 filtered contact。

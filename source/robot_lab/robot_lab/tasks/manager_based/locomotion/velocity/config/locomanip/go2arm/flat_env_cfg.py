@@ -15,11 +15,6 @@ class UnitreeGo2ArmFlatEnvCfg(UnitreeGo2ArmRoughEnvCfg):
 
         self.scene.terrain.terrain_type = "plane"
         self.scene.terrain.terrain_generator = None
-        terrain_contact_filter = self._terrain_contact_filter_prim_paths()
-        self.scene.FL_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.FR_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.RL_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.RR_foot_contact.filter_prim_paths_expr = terrain_contact_filter
 
         self.observations.arm_privileged.lpy.params = {"asset_cfg": SceneEntityCfg("robot", body_names=["link6"])}
         self.rewards.total_reward.params["foot_asset_cfg"] = SceneEntityCfg(

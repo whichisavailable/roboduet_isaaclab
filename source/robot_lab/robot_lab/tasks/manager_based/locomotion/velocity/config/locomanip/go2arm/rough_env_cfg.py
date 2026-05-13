@@ -189,7 +189,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.num_envs = 2048
         self.sim.gravity = (0.0, 0.0, -9.81)
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        self.scene.robot.spawn.merge_fixed_joints = False
+        self.scene.robot.spawn.merge_fixed_joints = True
         self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
         self.scene.robot.spawn.articulation_props.solver_position_iteration_count = 4
         self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 1
@@ -204,15 +204,8 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.FR_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/FR_foot"
         self.scene.RL_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/RL_foot"
         self.scene.RR_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/RR_foot"
-        self.scene.FL_foot_contact.prim_path = "{ENV_REGEX_NS}/Robot/FL_foot"
-        self.scene.FR_foot_contact.prim_path = "{ENV_REGEX_NS}/Robot/FR_foot"
-        self.scene.RL_foot_contact.prim_path = "{ENV_REGEX_NS}/Robot/RL_foot"
-        self.scene.RR_foot_contact.prim_path = "{ENV_REGEX_NS}/Robot/RR_foot"
         terrain_contact_filter = self._terrain_contact_filter_prim_paths()
-        self.scene.FL_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.FR_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.RL_foot_contact.filter_prim_paths_expr = terrain_contact_filter
-        self.scene.RR_foot_contact.filter_prim_paths_expr = terrain_contact_filter
+        self.scene.contact_forces.filter_prim_paths_expr = terrain_contact_filter
 
         self.observations.policy = None
         self.observations.dog_policy = RoboDuetDogPolicyObsCfg()
@@ -280,9 +273,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "tracking_sigma_yaw": 0.25,
             "gait_force_sigma": 100.0,
             "gait_vel_sigma": 10.0,
-            "illegal_contact_sensor_cfg": SceneEntityCfg(
-                "contact_forces", body_names=GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES
-            ),
+            "illegal_contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
             "foot_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "foot_asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "leg_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_LEG_JOINT_NAMES, preserve_order=True),
@@ -392,3 +383,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.FR_foot_scanner = None
         self.scene.RL_foot_scanner = None
         self.scene.RR_foot_scanner = None
+        self.scene.FL_foot_contact = None
+        self.scene.FR_foot_contact = None
+        self.scene.RL_foot_contact = None
+        self.scene.RR_foot_contact = None

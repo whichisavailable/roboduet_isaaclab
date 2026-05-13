@@ -158,31 +158,38 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._command_term("roboduet").apply_plan_actions(plan_actions)
 
     def _validate_go2arm_precise_foot_bodies(self) -> None:
-        """Ensure the current go2arm asset exposes the four feet and dedicated foot sensors."""
+        """Ensure the current go2arm asset exposes four feet in the shared whole-body contact sensor."""
         try:
             foot_body_ids, _ = self.scene["robot"].find_bodies(mdp.GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
-                "Go2Arm precise foot contact requires the robot asset to expose "
+                "Go2Arm whole-body contact requires the robot asset to expose "
                 "FL_foot/FR_foot/RL_foot/RR_foot as articulation bodies. "
                 "The current asset does not provide that layout."
             ) from exc
         if len(foot_body_ids) != 4:
             raise RuntimeError(
-                f"Go2Arm precise foot contact expected 4 articulation foot bodies, but found {len(foot_body_ids)}."
+                f"Go2Arm whole-body contact expected 4 articulation foot bodies, but found {len(foot_body_ids)}."
             )
-        missing_sensors = [
-            sensor_name for sensor_name in mdp.GO2ARM_FOOT_SENSOR_NAMES if sensor_name not in self.scene.sensors
-        ]
-        if missing_sensors:
+        if "contact_forces" not in self.scene.sensors:
             raise RuntimeError(
-                "Go2Arm precise foot contact requires the four dedicated foot sensors, "
-                f"but the following sensors are missing: {missing_sensors}."
+                "Go2Arm whole-body contact requires the shared `contact_forces` sensor, "
+                "but it is missing from the scene."
+            )
+        contact_sensor = self.scene.sensors["contact_forces"]
+        try:
+            contact_body_ids, _ = contact_sensor.find_bodies(mdp.GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "The shared `contact_forces` sensor does not expose FL_foot/FR_foot/RL_foot/RR_foot."
+            ) from exc
+        if len(contact_body_ids) != 4:
+            raise RuntimeError(
+                "The shared `contact_forces` sensor must include all four feet for go2arm contact semantics."
             )
         self._go2arm_has_foot_sensors = True
-        self._go2arm_foot_contact_sensors = tuple(
-            self.scene.sensors[sensor_name] for sensor_name in mdp.GO2ARM_FOOT_SENSOR_NAMES
-        )
+        self._go2arm_foot_contact_sensor = contact_sensor
+        self._go2arm_foot_contact_body_ids = tuple(int(body_id) for body_id in contact_body_ids)
 
     def _as_log_tensor(self, value: float | torch.Tensor) -> torch.Tensor:
         if isinstance(value, torch.Tensor):

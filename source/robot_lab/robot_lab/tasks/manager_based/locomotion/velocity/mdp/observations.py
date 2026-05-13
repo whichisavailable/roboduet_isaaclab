@@ -233,12 +233,12 @@ def _get_go2arm_ground_height_data(
 
 
 def _use_go2arm_precise_contact(env: ManagerBasedEnv) -> bool:
-    """Whether the current go2arm env exposes the required per-foot sensors."""
+    """Whether the current go2arm env exposes the required foot bodies in the shared contact sensor."""
     return bool(getattr(env, "_go2arm_has_foot_sensors", False))
 
 
 def _get_go2arm_precise_foot_sensor_data(env: ManagerBasedEnv) -> dict[str, torch.Tensor] | None:
-    """Read precise foot contact directly from the four dedicated foot sensors."""
+    """Read per-foot contact directly from the shared whole-body contact sensor."""
     if not _use_go2arm_precise_contact(env):
         return None
 
@@ -247,35 +247,31 @@ def _get_go2arm_precise_foot_sensor_data(env: ManagerBasedEnv) -> dict[str, torc
     if cached_data is not None and cached_data.get("key") == cache_key:
         return cached_data["value"]
 
-    foot_contact_sensors = getattr(env, "_go2arm_foot_contact_sensors", None)
-    if foot_contact_sensors is None:
-        if any(sensor_name not in env.scene.sensors for sensor_name in GO2ARM_FOOT_SENSOR_NAMES):
+    contact_sensor = getattr(env, "_go2arm_foot_contact_sensor", None)
+    body_ids = getattr(env, "_go2arm_foot_contact_body_ids", None)
+    if contact_sensor is None or body_ids is None:
+        contact_sensor = env.scene.sensors.get("contact_forces")
+        if contact_sensor is None:
             return None
-        foot_contact_sensors = tuple(env.scene.sensors[sensor_name] for sensor_name in GO2ARM_FOOT_SENSOR_NAMES)
-        env._go2arm_foot_contact_sensors = foot_contact_sensors
+        try:
+            body_ids, _ = contact_sensor.find_bodies(GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
+        except Exception:  # noqa: BLE001
+            return None
+        if len(body_ids) != len(GO2ARM_FOOT_BODY_NAMES):
+            return None
+        env._go2arm_foot_contact_sensor = contact_sensor
+        env._go2arm_foot_contact_body_ids = tuple(int(body_id) for body_id in body_ids)
 
+    body_ids = list(int(body_id) for body_id in body_ids)
     asset: Articulation = env.scene["robot"]
     dtype = asset.data.body_pos_w.dtype
-    force_vectors_per_foot: list[torch.Tensor] = []
-    air_time_per_foot: list[torch.Tensor] = []
-    contact_time_per_foot: list[torch.Tensor] = []
-
-    for foot_contact_sensor in foot_contact_sensors:
-        if foot_contact_sensor.data.force_matrix_w is not None:
-            force_vectors = torch.sum(foot_contact_sensor.data.force_matrix_w[:, 0, :, :], dim=1)
-        else:
-            force_vectors = foot_contact_sensor.data.net_forces_w[:, 0, :]
-        force_vectors_per_foot.append(force_vectors.to(dtype))
-        air_time_per_foot.append(foot_contact_sensor.data.current_air_time[:, 0].to(dtype))
-        contact_time_per_foot.append(foot_contact_sensor.data.current_contact_time[:, 0].to(dtype))
-
-    precise_foot_force_vectors = torch.stack(force_vectors_per_foot, dim=1)
+    precise_foot_force_vectors = contact_sensor.data.net_forces_w[:, body_ids, :].to(dtype)
     precise_foot_normal_forces = torch.abs(precise_foot_force_vectors[..., 2])
     foot_sensor_data = {
         "foot_force_vectors_w": precise_foot_force_vectors,
         "foot_normal_forces": precise_foot_normal_forces,
-        "current_air_time": torch.stack(air_time_per_foot, dim=1),
-        "current_contact_time": torch.stack(contact_time_per_foot, dim=1),
+        "current_air_time": contact_sensor.data.current_air_time[:, body_ids].to(dtype),
+        "current_contact_time": contact_sensor.data.current_contact_time[:, body_ids].to(dtype),
     }
     env._go2arm_precise_foot_sensor_cache = {"key": cache_key, "value": foot_sensor_data}
     return foot_sensor_data
