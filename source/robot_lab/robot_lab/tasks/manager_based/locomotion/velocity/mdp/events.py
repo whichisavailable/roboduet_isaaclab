@@ -157,6 +157,21 @@ def randomize_rigid_body_material_consistent(
     restitution = torch.empty(num_envs, 1, device="cpu").uniform_(*restitution_range)
     material_values = torch.cat((friction, friction, restitution), dim=1)
 
+    # Mirror upstream RoboDuet's explicit friction/restitution buffers so
+    # privileged observations can read the exact sampled values instead of
+    # re-deriving them from PhysX material queries.
+    friction_buffer = getattr(env, "_roboduet_friction_coeffs", None)
+    if friction_buffer is None or friction_buffer.shape[0] != env.scene.num_envs:
+        friction_buffer = torch.zeros(env.scene.num_envs, 1, device=env.device, dtype=torch.float32)
+        env._roboduet_friction_coeffs = friction_buffer
+    restitution_buffer = getattr(env, "_roboduet_restitutions", None)
+    if restitution_buffer is None or restitution_buffer.shape[0] != env.scene.num_envs:
+        restitution_buffer = torch.zeros(env.scene.num_envs, 1, device=env.device, dtype=torch.float32)
+        env._roboduet_restitutions = restitution_buffer
+    env_ids_device = env_ids_cpu.to(device=env.device, dtype=torch.long)
+    friction_buffer[env_ids_device] = friction.to(device=env.device, dtype=torch.float32)
+    restitution_buffer[env_ids_device] = restitution.to(device=env.device, dtype=torch.float32)
+
     if isinstance(asset_cfg.body_ids, slice):
         materials[env_ids_cpu, :, :] = material_values[:, None, :]
     else:

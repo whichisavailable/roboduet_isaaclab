@@ -91,6 +91,11 @@ GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES = [
     r"^(FL|FR|RL|RR)_calf(?:_link)?$",
     r"^link[1-6]$",
 ]
+# Upstream RoboDuet collision reward uses substring matching with
+# `penalize_contacts_on = ["thigh", "calf"]` after fixed-joint collapsing.
+# Keep the reward body-set aligned to that effective semantics instead of the
+# broader non-foot illegal-contact set used for whole-body monitoring.
+GO2ARM_UPSTREAM_COLLISION_BODY_REGEX = [r".*thigh.*", r".*calf.*"]
 # Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]
 # 预设 trot 步态偏置。

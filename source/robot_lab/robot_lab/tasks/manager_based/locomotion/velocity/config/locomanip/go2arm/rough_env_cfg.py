@@ -22,6 +22,7 @@ from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg impo
     GO2ARM_LEG_JOINT_NAMES,
     GO2ARM_NON_FOOT_BODY_REGEX,
     GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES,
+    GO2ARM_UPSTREAM_COLLISION_BODY_REGEX,
     Go2ArmDefaultDeltaJointPositionActionCfg,
     LocomotionVelocityRoughEnvCfg,
 )
@@ -277,7 +278,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "tracking_sigma_yaw": 0.25,
             "gait_force_sigma": 100.0,
             "gait_vel_sigma": 10.0,
-            "illegal_contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
+            "illegal_contact_sensor_cfg": SceneEntityCfg(
+                "contact_forces", body_names=GO2ARM_UPSTREAM_COLLISION_BODY_REGEX
+            ),
             "foot_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "foot_asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "leg_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_LEG_JOINT_NAMES, preserve_order=True),

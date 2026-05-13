@@ -867,10 +867,16 @@ def _material_property(
 
 
 def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    sampled = getattr(env, "_roboduet_friction_coeffs", None)
+    if sampled is not None:
+        return (sampled - 0.5) * 2.0
     return (_material_property(env, asset_cfg, material_index=0) - 0.5) * 2.0
 
 
 def roboduet_privileged_restitution(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    sampled = getattr(env, "_roboduet_restitutions", None)
+    if sampled is not None:
+        return (sampled - 0.5) * 2.0
     return (_material_property(env, asset_cfg, material_index=2) - 0.5) * 2.0
 
 
