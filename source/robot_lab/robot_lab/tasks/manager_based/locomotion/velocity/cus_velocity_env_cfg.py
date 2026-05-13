@@ -82,11 +82,10 @@ GO2ARM_FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 GO2ARM_FOOT_NAMES = list(GO2ARM_FOOT_BODY_NAMES)
 GO2ARM_CONTACT_SENSOR_PRIM_PATH = "{ENV_REGEX_NS}/Robot/.*"
 # Upstream RoboDuet can monitor whole-body illegal contacts.  This port keeps a cheaper subset:
-# dog trunk base, arm mount, lower legs, and arm links.  base_link is monitored as an arm mount
-# contact body, not as the upstream dog base/reference frame.
+# dog trunk base, lower legs, and arm links.  With fixed joints collapsed, the arm mount/base_link
+# collision geometry is folded into the dog trunk body named "base", so base_link is not a valid body.
 GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES = [
     GO2ARM_BASE_BODY_NAME,
-    "base_link",
     r"^(FL|FR|RL|RR)_thigh(?:_link)?$",
     r"^(FL|FR|RL|RR)_calf(?:_link)?$",
     r"^link[1-6]$",
