@@ -116,7 +116,7 @@ PRETRAINED_REWARD_SCALES = {
     "tracking_lin_vel": 1.0,
     "tracking_ang_vel": 0.5,
     "lin_vel_z": -0.1,
-    "ang_vel_xy": -0.001,
+    "ang_vel_xy": -0.005,
     "orientation_control": -5.0,
     "loco_energy": -0.00004,
     "feet_slip": -0.04,
