@@ -162,13 +162,13 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     reward_log_interval_iterations: int = 1
     reward_log_steps_per_iteration: int = 24
     enable_play_termination_reason_logging: bool = False
-    roboduet_randomize_gravity: bool = True
+    roboduet_randomize_gravity: bool = False
     roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)
     roboduet_gravity_interval_s: float = 8.0
     roboduet_gravity_impulse_duration: float = 0.99
-    roboduet_randomize_motor_strength: bool = True
+    roboduet_randomize_motor_strength: bool = False
     roboduet_motor_strength_range: tuple[float, float] = (0.9, 1.1)
-    roboduet_randomize_motor_offset: bool = True
+    roboduet_randomize_motor_offset: bool = False
     roboduet_motor_offset_range: tuple[float, float] = (-0.02, 0.02)
     roboduet_motor_randomization_interval_s: float = 4.0
     # Upstream `config_wtw()` overrides normalization.friction_range to [0, 1].
