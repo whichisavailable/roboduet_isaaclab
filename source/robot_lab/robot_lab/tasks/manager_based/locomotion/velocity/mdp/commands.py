@@ -985,15 +985,12 @@ class RoboDuetCommand(CommandTerm):
         return True
  
     def _refresh_command_buffer(self) -> None:
-        arm_command_obs = self.commands_arm_obs if self.switch_open else self._zero_arm_command_obs
-        self.command_buffer = torch.cat(
-            (
-                self.commands_dog[:, :3] * self.commands_scale_dog[:, :3],
-                arm_command_obs,
-                self.clock_inputs,
-            ),
-            dim=-1,
-        )
+        torch.mul(self.commands_dog[:, :3], self.commands_scale_dog[:, :3], out=self.command_buffer[:, :3])
+        if self.switch_open:
+            self.command_buffer[:, 3:9].copy_(self.commands_arm_obs)
+        else:
+            self.command_buffer[:, 3:9].copy_(self._zero_arm_command_obs)
+        self.command_buffer[:, 9:].copy_(self.clock_inputs)
  
     def _resample_command(self, env_ids: Sequence[int]):
         self._resample_locomotion_commands(torch.as_tensor(env_ids, dtype=torch.long, device=self.device))

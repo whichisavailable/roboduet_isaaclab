@@ -79,6 +79,7 @@ class AutomaticPPO:
             action_distribution_shape,
             self.device,
         )
+        self._zero_env_bins = torch.zeros(num_envs, 1, dtype=torch.long, device=self.device)
 
     def train_mode(self):
         self.actor_critic.train()
@@ -99,13 +100,14 @@ class AutomaticPPO:
         return self.transition.actions
 
     def process_env_step(self, rewards: torch.Tensor, dones: torch.Tensor, infos: dict):
-        self.transition.rewards = rewards.clone()
+        self.transition.rewards = rewards
         self.transition.dones = dones
-        self.transition.env_bins = torch.zeros(self.storage.num_envs, 1, dtype=torch.long, device=self.device)
         if "time_outs" in infos:
+            self.transition.rewards = rewards.clone()
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
             )
+        self.transition.env_bins = self._zero_env_bins
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
