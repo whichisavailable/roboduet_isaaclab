@@ -23,10 +23,10 @@ ROBODUET_GO2PIPER_GRIPPER_JOINT_REGEX = [r"^piper_joint[7-8]$"]
 ROBODUET_GO2PIPER_EE_BODY_NAME = "piper_link6"
 ROBODUET_GO2PIPER_COLLISION_BODY_REGEX = [
     r"^base$",
+    r"^trunk$",
     r".*thigh.*",
     r".*calf.*",
     r"^piper_link[1-8]$",
-    r"^gripper_base$",
 ]
 ROBODUET_GO2PIPER_EE_ROT_OFFSET_WXYZ = (0.0, 0.7071, 0.0, -0.7071)
 ROBODUET_GO2PIPER_EE_POS_OFFSET_LOCAL = (0.12, 0.0, 0.0)
