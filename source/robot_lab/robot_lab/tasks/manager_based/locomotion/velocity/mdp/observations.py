@@ -254,22 +254,22 @@ def _get_go2arm_ground_height_data(
 
 
 def _use_go2arm_precise_contact(env: ManagerBasedEnv) -> bool:
-    """Whether the current go2arm env exposes the required foot bodies in the shared contact sensor."""
-    return bool(getattr(env, "_go2arm_has_foot_sensors", False))
+    """Whether the shared whole-body contact sensor exposes the required foot bodies."""
+    return bool(getattr(env, "_go2arm_has_shared_contact_feet", False))
 
 
 def _get_go2arm_precise_foot_sensor_data(env: ManagerBasedEnv) -> dict[str, torch.Tensor] | None:
-    """Read per-foot contact directly from the shared whole-body contact sensor."""
+    """Slice per-foot contact directly from the shared whole-body contact sensor."""
     if not _use_go2arm_precise_contact(env):
         return None
 
-    cache_key = (getattr(env, "common_step_counter", -1), "go2arm_precise_foot_sensor_data")
+    cache_key = (getattr(env, "common_step_counter", -1), "go2arm_shared_contact_foot_data")
     cached_data = getattr(env, "_go2arm_precise_foot_sensor_cache", None)
     if cached_data is not None and cached_data.get("key") == cache_key:
         return cached_data["value"]
 
-    contact_sensor = getattr(env, "_go2arm_foot_contact_sensor", None)
-    body_ids = getattr(env, "_go2arm_foot_contact_body_ids", None)
+    contact_sensor = getattr(env, "_go2arm_shared_contact_sensor", None)
+    body_ids = getattr(env, "_go2arm_shared_contact_foot_body_ids", None)
     if contact_sensor is None or body_ids is None:
         contact_sensor = env.scene.sensors.get("contact_forces")
         if contact_sensor is None:
@@ -280,8 +280,8 @@ def _get_go2arm_precise_foot_sensor_data(env: ManagerBasedEnv) -> dict[str, torc
             return None
         if len(body_ids) != len(GO2ARM_FOOT_BODY_NAMES):
             return None
-        env._go2arm_foot_contact_sensor = contact_sensor
-        env._go2arm_foot_contact_body_ids = tuple(int(body_id) for body_id in body_ids)
+        env._go2arm_shared_contact_sensor = contact_sensor
+        env._go2arm_shared_contact_foot_body_ids = tuple(int(body_id) for body_id in body_ids)
 
     body_ids = list(int(body_id) for body_id in body_ids)
     asset: Articulation = env.scene["robot"]

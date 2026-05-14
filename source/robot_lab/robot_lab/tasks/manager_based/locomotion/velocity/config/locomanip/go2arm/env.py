@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import torch
 
@@ -46,9 +47,17 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._go2arm_last_last_joint_pos_target = torch.zeros_like(self.action_manager.action)
         self._roboduet_reward_dog = torch.zeros(self.num_envs, device=self.device)
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
-        self._validate_go2arm_precise_foot_bodies()
+        self._validate_go2arm_shared_contact_feet()
         arm_joint_names = resolve_go2arm_arm_joint_names(cfg)
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(arm_joint_names, preserve_order=True)
+        self._go2arm_hold_joint_ids: tuple[int, ...] = ()
+        hold_joint_patterns = tuple(getattr(getattr(cfg.actions, "joint_pos", None), "hold_fixed_joint_names", ()) or ())
+        if hold_joint_patterns:
+            hold_joint_ids = []
+            for joint_id, joint_name in enumerate(self.scene["robot"].joint_names):
+                if any(re.fullmatch(pattern, joint_name) for pattern in hold_joint_patterns):
+                    hold_joint_ids.append(int(joint_id))
+            self._go2arm_hold_joint_ids = tuple(hold_joint_ids)
         self._go2arm_leg_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_LEG_JOINT_NAMES, preserve_order=True)
         self._configure_roboduet_motor_randomization(cfg)
         self._configure_roboduet_gravity_randomization(cfg)
@@ -159,8 +168,8 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self.plan_actions.copy_(plan_actions * 0.4)
         self._command_term("roboduet").apply_plan_actions(plan_actions)
 
-    def _validate_go2arm_precise_foot_bodies(self) -> None:
-        """Ensure the current go2arm asset exposes four feet in the shared whole-body contact sensor."""
+    def _validate_go2arm_shared_contact_feet(self) -> None:
+        """Ensure the shared whole-body contact sensor exposes the four Go2Arm feet."""
         try:
             foot_body_ids, _ = self.scene["robot"].find_bodies(mdp.GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
         except Exception as exc:  # noqa: BLE001
@@ -189,9 +198,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             raise RuntimeError(
                 "The shared `contact_forces` sensor must include all four feet for go2arm contact semantics."
             )
-        self._go2arm_has_foot_sensors = True
-        self._go2arm_foot_contact_sensor = contact_sensor
-        self._go2arm_foot_contact_body_ids = tuple(int(body_id) for body_id in contact_body_ids)
+        self._go2arm_has_shared_contact_feet = True
+        self._go2arm_shared_contact_sensor = contact_sensor
+        self._go2arm_shared_contact_foot_body_ids = tuple(int(body_id) for body_id in contact_body_ids)
 
     def _as_log_tensor(self, value: float | torch.Tensor) -> torch.Tensor:
         if isinstance(value, torch.Tensor):
@@ -313,13 +322,14 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         return current_iteration < float(fixed_until_iteration)
 
     def _keep_go2arm_arm_fixed(self) -> None:
-        if len(self._go2arm_arm_joint_ids) == 0:
+        fixed_joint_ids = tuple(int(joint_id) for joint_id in self._go2arm_arm_joint_ids) + tuple(self._go2arm_hold_joint_ids)
+        if len(fixed_joint_ids) == 0:
             return
         robot = self.scene["robot"]
-        arm_joint_ids = torch.as_tensor(self._go2arm_arm_joint_ids, dtype=torch.long, device=self.device)
-        arm_default_pos = robot.data.default_joint_pos[:, arm_joint_ids]
-        arm_zero_vel = torch.zeros_like(arm_default_pos)
-        robot.write_joint_state_to_sim(arm_default_pos, arm_zero_vel, joint_ids=arm_joint_ids)
+        joint_ids = torch.as_tensor(fixed_joint_ids, dtype=torch.long, device=self.device)
+        default_pos = robot.data.default_joint_pos[:, joint_ids]
+        zero_vel = torch.zeros_like(default_pos)
+        robot.write_joint_state_to_sim(default_pos, zero_vel, joint_ids=joint_ids)
 
     def _classify_episode_bucket(
         self, sampled_target_pos_b: torch.Tensor, target_pos_w: torch.Tensor, command_cfg

@@ -208,8 +208,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.FR_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/FR_foot"
         self.scene.RL_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/RL_foot"
         self.scene.RR_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/RR_foot"
-        terrain_contact_filter = self._terrain_contact_filter_prim_paths()
-        self.scene.contact_forces.filter_prim_paths_expr = terrain_contact_filter
+        # Keep the shared whole-body contact sensor truly global. RoboDuet contact rewards,
+        # collision penalties, and contact logging should all see unfiltered net contact.
+        self.scene.contact_forces.filter_prim_paths_expr = []
 
         self.observations.policy = None
         self.observations.dog_policy = RoboDuetDogPolicyObsCfg()
