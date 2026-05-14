@@ -90,11 +90,23 @@ GO2ARM_SIMPLIFIED_ILLEGAL_CONTACT_BODY_NAMES = [
     r"^(FL|FR|RL|RR)_calf(?:_link)?$",
     r"^link[1-6]$",
 ]
-# Upstream RoboDuet collision reward uses substring matching with
-# `penalize_contacts_on = ["thigh", "calf"]` after fixed-joint collapsing.
-# Keep the reward body-set aligned to that effective semantics instead of the
-# broader non-foot illegal-contact set used for whole-body monitoring.
-GO2ARM_UPSTREAM_COLLISION_BODY_REGEX = [r".*thigh.*", r".*calf.*"]
+# Upstream RoboDuet go2piper training (`scripts/auto_train.py`, `robot=go2`)
+# builds `rew_collision` from:
+# `penalize_contacts_on = ["base", "trunk", "arm", "wrist", "zarx",
+# "gripper", "thigh", "calf", "Head", "piper"]`.
+# In this Isaac Lab port, fixed-joint collapsing plus the no-gripper URDF
+# changes the effective body set as follows:
+# - upstream `base` / `trunk` / fixed arm mount geometry -> `base`
+# - upstream `piper_*` arm links / fixed `gripper_base` -> `link1`..`link6`
+# - upstream leg substring matching remains `thigh` / `calf`
+# Keep `rew_collision` aligned to that effective upstream semantics instead of
+# the broader non-foot illegal-contact set used for whole-body monitoring.
+GO2ARM_UPSTREAM_COLLISION_BODY_REGEX = [
+    r"^base$",
+    r".*thigh.*",
+    r".*calf.*",
+    r"^link[1-6]$",
+]
 # Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]
 # 预设 trot 步态偏置。
