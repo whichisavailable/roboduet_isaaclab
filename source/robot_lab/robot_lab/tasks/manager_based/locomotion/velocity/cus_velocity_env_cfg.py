@@ -122,6 +122,11 @@ GO2ARM_FOOT_SCANNER_NAMES = (
 )
 
 
+def resolve_go2arm_arm_joint_names(cfg) -> tuple[str, ...]:
+    names = getattr(cfg, "roboduet_arm_joint_names", GO2ARM_ARM_JOINT_NAMES)
+    return tuple(str(name) for name in names)
+
+
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
     """go2arm 任务的场景配置。"""
@@ -326,15 +331,18 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         self._env = env
         self._action_scale = float(cfg.action_scale)
         self._roboduet_global_joint_ids = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
+        self._arm_joint_names = resolve_go2arm_arm_joint_names(getattr(env, "cfg", None))
 
         leg_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_LEG_JOINT_NAMES]
-        arm_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_ARM_JOINT_NAMES]
+        arm_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in self._arm_joint_names]
         self._leg_action_ids = torch.tensor(leg_action_ids, dtype=torch.long, device=self.device)
         self._arm_action_ids = torch.tensor(arm_action_ids, dtype=torch.long, device=self.device)
         self._leg_joint_ids = self._roboduet_global_joint_ids[self._leg_action_ids]
         self._arm_joint_ids = self._roboduet_global_joint_ids[self._arm_action_ids]
         self._leg_joint_ids_list = [int(joint_id) for joint_id in self._leg_joint_ids.tolist()]
         self._arm_joint_ids_list = [int(joint_id) for joint_id in self._arm_joint_ids.tolist()]
+        self._hold_joint_ids = torch.empty(0, dtype=torch.long, device=self.device)
+        self._hold_joint_ids_list: list[int] = []
         self._leg_kp = torch.full(
             (self.num_envs, len(leg_action_ids)), float(cfg.leg_stiffness), dtype=torch.float32, device=self.device
         )
@@ -343,6 +351,7 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         )
         self._leg_position_target = self._asset.data.default_joint_pos[:, self._leg_joint_ids].clone()
         self._arm_position_target = self._asset.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        self._hold_position_target = torch.zeros(self.num_envs, 0, dtype=torch.float32, device=self.device)
         self._leg_motor_offsets = torch.zeros_like(self._leg_position_target)
         self._leg_motor_strengths = torch.ones_like(self._leg_position_target)
 
@@ -373,6 +382,17 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
             ]
             if hip_ids:
                 self._hip_scale_joint_ids = torch.tensor(hip_ids, dtype=torch.long, device=self.device)
+
+        if cfg.hold_fixed_joint_names is not None:
+            hold_ids = [
+                joint_id
+                for joint_id, joint_name in enumerate(self._asset.joint_names)
+                if any(re.fullmatch(pattern, joint_name) for pattern in cfg.hold_fixed_joint_names)
+            ]
+            if hold_ids:
+                self._hold_joint_ids = torch.tensor(hold_ids, dtype=torch.long, device=self.device)
+                self._hold_joint_ids_list = [int(joint_id) for joint_id in hold_ids]
+                self._hold_position_target = self._asset.data.default_joint_pos[:, self._hold_joint_ids].clone()
 
     def process_actions(self, actions: torch.Tensor):
         # Store the effective action after any curriculum mask, so observations/rewards see executed deltas.
@@ -432,6 +452,8 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         leg_torque = torch.clamp(leg_torque, min=-leg_effort_limits, max=leg_effort_limits)
         self._asset.set_joint_effort_target(leg_torque, joint_ids=self._leg_joint_ids_list)
         self._asset.set_joint_position_target(self._arm_position_target, joint_ids=self._arm_joint_ids_list)
+        if self._hold_joint_ids_list:
+            self._asset.set_joint_position_target(self._hold_position_target, joint_ids=self._hold_joint_ids_list)
 
         leg_torque_global = torch.zeros_like(self._asset.data.default_joint_pos)
         leg_torque_global[:, self._leg_joint_ids] = leg_torque
@@ -471,6 +493,7 @@ class Go2ArmDefaultDeltaJointPositionActionCfg(mdp.JointPositionActionCfg):
     fixed_delta_action_until_iteration: int | None = None
     fixed_delta_action_steps_per_iteration: int = 24
     fixed_delta_action_value: float = 0.0
+    hold_fixed_joint_names: list[str] | None = None
 
 
 @configclass

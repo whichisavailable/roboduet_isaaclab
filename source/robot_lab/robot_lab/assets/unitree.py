@@ -153,6 +153,96 @@ UNITREE_Go2Arm_CFG = ArticulationCfg(
     actuators=UNITREE_Go2Arm_USD_CFG.actuators,
 )
 
+UNITREE_Go2Arm_ROBODUET_GO2PIPER_CFG = ArticulationCfg(
+    spawn=sim_utils.UrdfFileCfg(
+        fix_base=False,
+        merge_fixed_joints=True,
+        replace_cylinders_with_capsules=True,
+        asset_path=(
+            f"{ISAACLAB_ASSETS_DATA_DIR}/Robots/unitree/roboduet_go2piper/go2/urdf/"
+            "go2piper.urdf"
+        ),
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
+        ),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0, damping=0.0)
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.34),
+        joint_pos={
+            ".*L_hip_joint": 0.1,
+            ".*R_hip_joint": -0.1,
+            "F.*_thigh_joint": 0.8,
+            "R.*_thigh_joint": 1.0,
+            ".*_calf_joint": -1.5,
+            "piper_joint1": 0.0,
+            "piper_joint2": 0.6,
+            "piper_joint3": -0.5,
+            "piper_joint4": 0.0,
+            "piper_joint5": 0.0,
+            "piper_joint6": 0.0,
+            "piper_joint7": 0.0,
+            "piper_joint8": 0.0,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=UNITREE_Go2Arm_USD_CFG.soft_joint_pos_limit_factor,
+    actuators={
+        "leg_hip_thigh": UNITREE_Go2Arm_USD_CFG.actuators["leg_hip_thigh"],
+        "leg_calf": UNITREE_Go2Arm_USD_CFG.actuators["leg_calf"],
+        "arm": DelayedPDActuatorCfg(
+            joint_names_expr=[r"piper_joint[1-6]"],
+            effort_limit=50,
+            velocity_limit=28,
+            stiffness={
+                "piper_joint1": 40.0,
+                "piper_joint2": 80.0,
+                "piper_joint3": 80.0,
+                "piper_joint4": 40.0,
+                "piper_joint5": 80.0,
+                "piper_joint6": 40.0,
+            },
+            damping={
+                "piper_joint1": 3.0,
+                "piper_joint2": 6.0,
+                "piper_joint3": 6.0,
+                "piper_joint4": 3.0,
+                "piper_joint5": 6.0,
+                "piper_joint6": 3.0,
+            },
+            friction=0.0,
+        ),
+        "gripper": DelayedPDActuatorCfg(
+            joint_names_expr=[r"piper_joint[7-8]"],
+            effort_limit=10,
+            velocity_limit=1.0,
+            stiffness={
+                "piper_joint7": 40.0,
+                "piper_joint8": 40.0,
+            },
+            damping={
+                "piper_joint7": 3.0,
+                "piper_joint8": 3.0,
+            },
+            friction=0.0,
+        ),
+    },
+)
+
 UNITREE_A1_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,

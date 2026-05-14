@@ -81,6 +81,27 @@ def _go2arm_phase_offsets(device: torch.device, dtype: torch.dtype, phase_offset
     return _GO2ARM_PHASE_OFFSETS_CACHE[cache_key]
 
 
+def _roboduet_ee_rot_offset(env: ManagerBasedEnv, dtype: torch.dtype) -> torch.Tensor:
+    values = getattr(getattr(env, "cfg", None), "roboduet_ee_rot_offset_wxyz", (1.0, 0.0, 0.0, 0.0))
+    return torch.tensor(values, device=env.device, dtype=dtype).unsqueeze(0).expand(env.num_envs, 4)
+
+
+def _roboduet_ee_pos_offset(env: ManagerBasedEnv, dtype: torch.dtype) -> torch.Tensor:
+    values = getattr(getattr(env, "cfg", None), "roboduet_ee_pos_offset_local", (0.0, 0.0, 0.0))
+    return torch.tensor(values, device=env.device, dtype=dtype).unsqueeze(0).expand(env.num_envs, 3)
+
+
+def _roboduet_effective_ee_pose_w(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg
+) -> tuple[Articulation, torch.Tensor, torch.Tensor]:
+    asset: Articulation = env.scene[asset_cfg.name]
+    ee_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    ee_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    ee_quat_w = quat_mul(ee_quat_w, _roboduet_ee_rot_offset(env, ee_quat_w.dtype))
+    ee_pos_w = ee_pos_w + quat_apply(ee_quat_w, _roboduet_ee_pos_offset(env, ee_pos_w.dtype))
+    return asset, ee_pos_w, ee_quat_w
+
+
 def _get_command_term(env: ManagerBasedEnv, command_name: str):
     return env.command_manager.get_term(command_name)
 
@@ -891,8 +912,7 @@ def _ground_height_under_base(env: ManagerBasedEnv) -> torch.Tensor:
 
 
 def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: Articulation = env.scene[asset_cfg.name]
-    ee_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    asset, ee_pos_w, _ = _roboduet_effective_ee_pose_w(env, asset_cfg)
     base_pos_w, base_quat_w = roboduet_base_pose_w(asset)
     yaw_quat = _body_yaw_quat(base_quat_w)
     delta_world = ee_pos_w - base_pos_w
@@ -905,7 +925,7 @@ def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> tor
 
 
 def roboduet_current_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: Articulation = env.scene[asset_cfg.name]
+    asset, _, ee_quat_w = _roboduet_effective_ee_pose_w(env, asset_cfg)
     _, base_quat_w = roboduet_base_pose_w(asset)
     yaw_quat = _body_yaw_quat(base_quat_w)
-    return quat_mul(quat_conjugate(yaw_quat), asset.data.body_quat_w[:, asset_cfg.body_ids[0]])
+    return quat_mul(quat_conjugate(yaw_quat), ee_quat_w)

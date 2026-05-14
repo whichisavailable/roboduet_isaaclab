@@ -13,6 +13,7 @@ import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import (
     GO2ARM_ARM_JOINT_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
+    resolve_go2arm_arm_joint_names,
 )
 
 
@@ -46,7 +47,8 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._roboduet_reward_dog = torch.zeros(self.num_envs, device=self.device)
         self._roboduet_reward_arm = torch.zeros(self.num_envs, device=self.device)
         self._validate_go2arm_precise_foot_bodies()
-        self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_ARM_JOINT_NAMES, preserve_order=True)
+        arm_joint_names = resolve_go2arm_arm_joint_names(cfg)
+        self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(arm_joint_names, preserve_order=True)
         self._go2arm_leg_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_LEG_JOINT_NAMES, preserve_order=True)
         self._configure_roboduet_motor_randomization(cfg)
         self._configure_roboduet_gravity_randomization(cfg)

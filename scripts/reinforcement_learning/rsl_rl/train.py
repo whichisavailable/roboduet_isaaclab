@@ -65,6 +65,15 @@ parser.add_argument(
         "sets the runner iteration to 10000, syncs the env counters, and starts training directly in stage2."
     ),
 )
+parser.add_argument(
+    "--roboduet_urdf",
+    action="store_true",
+    default=False,
+    help=(
+        "Use the RoboDuet upstream auto_train robot=go2 URDF and its matching end-effector tool-frame offsets. "
+        "Disabled by default so the current local go2arm URDF remains the training default."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -149,6 +158,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import robot_lab.tasks  # noqa: F401  # isort: skip
 from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.callable_resolver import (
     resolve_callable,
+)
+from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.roboduet_urdf import (
+    apply_roboduet_go2piper_overrides,
 )
 
 # import logger
@@ -614,6 +626,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.roboduet_urdf:
+        apply_roboduet_go2piper_overrides(env_cfg)
+        print("[INFO] RoboDuet URDF override enabled: using upstream auto_train robot=go2 go2piper URDF.")
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
