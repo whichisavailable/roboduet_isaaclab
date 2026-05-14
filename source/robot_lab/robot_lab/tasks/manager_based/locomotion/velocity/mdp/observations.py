@@ -887,18 +887,33 @@ def _material_property(
     return result
 
 
+def _roboduet_scale_shift(
+    values: torch.Tensor,
+    value_range: tuple[float, float],
+) -> torch.Tensor:
+    scale = 2.0 / float(value_range[1] - value_range[0])
+    shift = (float(value_range[1]) + float(value_range[0])) / 2.0
+    return (values - shift) * scale
+
+
 def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     sampled = getattr(env, "_roboduet_friction_coeffs", None)
+    norm_range = tuple(
+        float(v) for v in getattr(getattr(env, "cfg", None), "roboduet_friction_normalization_range", (0.05, 4.5))
+    )
     if sampled is not None:
-        return (sampled - 0.5) * 2.0
-    return (_material_property(env, asset_cfg, material_index=0) - 0.5) * 2.0
+        return _roboduet_scale_shift(sampled, norm_range)
+    return _roboduet_scale_shift(_material_property(env, asset_cfg, material_index=0), norm_range)
 
 
 def roboduet_privileged_restitution(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     sampled = getattr(env, "_roboduet_restitutions", None)
+    norm_range = tuple(
+        float(v) for v in getattr(getattr(env, "cfg", None), "roboduet_restitution_normalization_range", (0.0, 1.0))
+    )
     if sampled is not None:
-        return (sampled - 0.5) * 2.0
-    return (_material_property(env, asset_cfg, material_index=2) - 0.5) * 2.0
+        return _roboduet_scale_shift(sampled, norm_range)
+    return _roboduet_scale_shift(_material_property(env, asset_cfg, material_index=2), norm_range)
 
 
 def _ground_height_under_base(env: ManagerBasedEnv) -> torch.Tensor:
@@ -929,3 +944,20 @@ def roboduet_current_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntit
     _, base_quat_w = roboduet_base_pose_w(asset)
     yaw_quat = _body_yaw_quat(base_quat_w)
     return quat_mul(quat_conjugate(yaw_quat), ee_quat_w)
+
+
+def roboduet_privileged_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Match upstream RoboDuet arm privileged quaternion logging exactly.
+
+    Upstream `go1_gym/envs/automatic/__init__.py` builds the arm privileged quaternion
+    from the raw end-effector body quaternion without applying `ee_rot_offset`, and
+    multiplies it by the base yaw quaternion directly before concatenating it into the
+    privileged observation. Keep that exact target here so adaptation loss matches the
+    training target actually used upstream.
+    """
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    raw_ee_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    _, base_quat_w = roboduet_base_pose_w(asset)
+    yaw_quat = _body_yaw_quat(base_quat_w)
+    return quat_mul(yaw_quat, raw_ee_quat_w)

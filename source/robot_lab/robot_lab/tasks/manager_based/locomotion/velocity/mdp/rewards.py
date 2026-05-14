@@ -3033,16 +3033,20 @@ def _compute_roboduet_reward_state(
             foot_kinematics = _get_go2arm_foot_kinematics(env, foot_asset_cfg)
         return foot_kinematics
 
-    foot_forces = None
+    foot_force_vectors = None
+    foot_force_norms = None
+    foot_force_z = None
     if has_active(
         "feet_slip",
         "feet_clearance_cmd_linear",
         "tracking_contacts_shaped_force",
         "tracking_contacts_shaped_vel",
     ) or has_ever_active("feet_slip"):
-        foot_forces = get_go2arm_precise_foot_normal_forces(env, foot_sensor_cfg)
-        if foot_forces is None:
+        foot_force_vectors = get_go2arm_precise_foot_contact_forces(env, foot_sensor_cfg)
+        if foot_force_vectors is None:
             raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
+        foot_force_norms = torch.linalg.norm(foot_force_vectors, dim=-1)
+        foot_force_z = foot_force_vectors[..., 2]
 
     root_lin_vel_b, root_ang_vel_b = roboduet_base_velocity_b(robot)
     desired_contact = term.desired_contact_states
@@ -3089,9 +3093,9 @@ def _compute_roboduet_reward_state(
             dim=1,
         )
 
-    if foot_forces is not None:
+    if foot_force_vectors is not None and foot_force_norms is not None and foot_force_z is not None:
         if has_ever_active("feet_slip"):
-            foot_contacts = foot_forces > 1.0
+            foot_contacts = foot_force_z > 1.0
             last_foot_contacts = getattr(env, "_roboduet_last_foot_contacts", None)
             if last_foot_contacts is None or last_foot_contacts.shape != foot_contacts.shape:
                 last_foot_contacts = torch.zeros_like(foot_contacts)
@@ -3123,7 +3127,7 @@ def _compute_roboduet_reward_state(
 
         if has_active("tracking_contacts_shaped_force"):
             metrics["tracking_contacts_shaped_force"] = -torch.sum(
-                (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_forces) / gait_force_sigma)),
+                (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_force_norms) / gait_force_sigma)),
                 dim=1,
             ) / 4.0
 

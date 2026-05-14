@@ -103,7 +103,7 @@ class RoboDuetArmPrivilegedObsCfg(ObsGroup):
         params={"asset_cfg": SceneEntityCfg("robot", body_names=["link6"])},
     )
     ee_quat_in_base = ObsTerm(
-        func=mdp.roboduet_current_ee_quat_in_base,
+        func=mdp.roboduet_privileged_ee_quat_in_base,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=["link6"])},
     )
 
@@ -171,6 +171,8 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     roboduet_randomize_motor_offset: bool = True
     roboduet_motor_offset_range: tuple[float, float] = (-0.02, 0.02)
     roboduet_motor_randomization_interval_s: float = 4.0
+    roboduet_friction_normalization_range: tuple[float, float] = (0.05, 4.5)
+    roboduet_restitution_normalization_range: tuple[float, float] = (0.0, 1.0)
     episode_log_key_prefixes: tuple[str, ...] = (
         "rew_",
         "Len/",

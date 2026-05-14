@@ -421,14 +421,6 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         if roboduet_reward_names:
             blocked_reward_keys = {f"Episode_Reward/{name}" for name in roboduet_reward_names}
             blocked_reward_keys.add("Episode_Reward/total_reward")
-            inv_step_dt = 1.0 / float(self.step_dt)
-            for reward_name in roboduet_reward_names:
-                reward_key = f"Episode_Reward/{reward_name}"
-                if reward_key in log_dict:
-                    filtered_log_dict[f"rew_{reward_name}"] = self._as_log_tensor(log_dict[reward_key]) * inv_step_dt
-            total_reward_key = "Episode_Reward/total_reward"
-            if total_reward_key in log_dict:
-                filtered_log_dict["rew_total"] = self._as_log_tensor(log_dict[total_reward_key]) * inv_step_dt
             filtered_log_dict = {
                 key: value for key, value in filtered_log_dict.items() if key not in blocked_reward_keys
             }
@@ -590,7 +582,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         reward_term_name = "total_reward"
         terminal_tracking_errors = None
         if reward_term_name in self.reward_manager.active_terms and hasattr(self, "_roboduet_reward_term_names"):
-            self._log_roboduet_reward_terms(episode_dict, done_mask, write_episode=False)
+            # Match upstream RoboDuet logging semantics: `rew_*` in training logs should
+            # come from per-episode accumulated reward terms, not from IsaacLab's
+            # `Episode_Reward/*` values that are normalized by episode-length seconds.
+            self._log_roboduet_reward_terms(episode_dict, done_mask, write_episode=True)
 
         if (
             prev_sampled_target_pos_b_done is not None
