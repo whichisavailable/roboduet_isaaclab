@@ -215,6 +215,11 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Keep the shared whole-body contact sensor truly global. RoboDuet contact rewards,
         # collision penalties, and contact logging should all see unfiltered net contact.
         self.scene.contact_forces.filter_prim_paths_expr = []
+        # Isaac Lab allocates the contact reporter buffer from this value even when only
+        # reading `net_forces_w`. The default value (4) is too small for whole-body
+        # loco-manip contacts and silently truncates contact data, which depresses both
+        # `rew_collision` and the foot contact shaping terms.
+        self.scene.contact_forces.max_contact_data_count_per_prim = 32
 
         self.observations.policy = None
         self.observations.dog_policy = RoboDuetDogPolicyObsCfg()

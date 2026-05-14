@@ -23,7 +23,6 @@ from .observations import (
     GO2ARM_COMMAND_CURRICULUM_KEYS,
     GO2ARM_FOOT_BODY_NAMES,
     GO2ARM_FOOT_SCANNER_NAMES,
-    GO2ARM_FOOT_SENSOR_NAMES,
     GO2ARM_FOOT_SPHERE_RADIUS,
     _get_go2arm_foot_kinematics,
     _get_go2arm_ground_height_data,

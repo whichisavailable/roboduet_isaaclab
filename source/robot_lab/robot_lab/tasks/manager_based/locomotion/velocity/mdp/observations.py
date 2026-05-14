@@ -34,7 +34,6 @@ GO2ARM_FOOT_SPHERE_CENTER_OFFSET_B = (
 GO2ARM_FOOT_SPHERE_RADIUS = 0.022
 GO2ARM_FOOT_BODY_NAMES = ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
 GO2ARM_FOOT_SCANNER_NAMES = ("FL_foot_scanner", "FR_foot_scanner", "RL_foot_scanner", "RR_foot_scanner")
-GO2ARM_FOOT_SENSOR_NAMES = ("FL_foot_contact", "FR_foot_contact", "RL_foot_contact", "RR_foot_contact")
 GO2ARM_LEG_JOINT_NAMES = (
     "FL_hip_joint",
     "FL_thigh_joint",
@@ -259,14 +258,14 @@ def _use_go2arm_precise_contact(env: ManagerBasedEnv) -> bool:
 
 
 def _get_go2arm_precise_foot_sensor_data(env: ManagerBasedEnv) -> dict[str, torch.Tensor] | None:
-    """Slice per-foot contact directly from the shared whole-body contact sensor."""
-    if not _use_go2arm_precise_contact(env):
-        return None
-
-    cache_key = (getattr(env, "common_step_counter", -1), "go2arm_shared_contact_foot_data")
+    """Return per-foot contact data sliced from the shared whole-body contact sensor."""
+    cache_key = (getattr(env, "common_step_counter", -1), "go2arm_precise_foot_contact_data")
     cached_data = getattr(env, "_go2arm_precise_foot_sensor_cache", None)
     if cached_data is not None and cached_data.get("key") == cache_key:
         return cached_data["value"]
+
+    if not _use_go2arm_precise_contact(env):
+        return None
 
     contact_sensor = getattr(env, "_go2arm_shared_contact_sensor", None)
     body_ids = getattr(env, "_go2arm_shared_contact_foot_body_ids", None)
