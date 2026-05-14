@@ -381,17 +381,15 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
     def _accumulate_done_episode_stats(
         self,
         episode_dict: dict[str, float | torch.Tensor],
-        done_mask: torch.Tensor,
-        prev_episode_length_buf: torch.Tensor,
-        prev_sampled_target_pos_b: torch.Tensor,
-        prev_target_pos_w: torch.Tensor,
+        done_ids: torch.Tensor,
+        done_episode_lengths: torch.Tensor,
+        done_sampled_target_pos_b: torch.Tensor,
+        done_target_pos_w: torch.Tensor,
         terminal_tracking_errors: dict[str, torch.Tensor] | None,
     ) -> None:
-        if not torch.any(done_mask):
+        if done_ids.numel() == 0:
             return
 
-        done_ids = torch.where(done_mask)[0]
-        done_episode_lengths = prev_episode_length_buf[done_ids].to(torch.float32) + 1.0
         if terminal_tracking_errors is not None:
             for term_name, term_value in terminal_tracking_errors.items():
                 self._accumulate_tensor_mean_log(
@@ -415,8 +413,8 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         bucket_to_lengths: dict[str, list[float]] = {}
         for local_idx, env_id in enumerate(done_ids.tolist()):
             bucket = self._classify_episode_bucket(
-                prev_sampled_target_pos_b[env_id],
-                prev_target_pos_w[env_id],
+                done_sampled_target_pos_b[local_idx],
+                done_target_pos_w[local_idx],
                 command_cfg,
             )
             bucket_to_lengths.setdefault(bucket, []).append(float(done_episode_lengths[local_idx].item()))
@@ -534,14 +532,11 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             section_start = step_start
 
         self._roboduet_reward_step_cache = None
-        self.action_manager.prev_prev_action = self.action_manager.prev_action.clone()
-        prev_episode_length_buf = self.episode_length_buf.clone()
+        self.action_manager.prev_prev_action.copy_(self.action_manager.prev_action)
         command_term = self._command_term()
-        prev_sampled_target_pos_b = None
-        prev_target_pos_w = None
-        if hasattr(command_term, "sampled_target_pos_b") and hasattr(command_term, "target_pos_w"):
-            prev_sampled_target_pos_b = getattr(command_term, "sampled_target_pos_b").clone()
-            prev_target_pos_w = getattr(command_term, "target_pos_w").clone()
+        prev_sampled_target_pos_b_done = None
+        prev_target_pos_w_done = None
+        done_episode_lengths = None
 
         if self._debug_zero_action:
             action = torch.zeros_like(action)
@@ -601,6 +596,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
 
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
+            done_episode_lengths = self.episode_length_buf[reset_env_ids].to(torch.float32).clone()
+            if hasattr(command_term, "sampled_target_pos_b") and hasattr(command_term, "target_pos_w"):
+                prev_sampled_target_pos_b_done = getattr(command_term, "sampled_target_pos_b")[reset_env_ids].clone()
+                prev_target_pos_w_done = getattr(command_term, "target_pos_w")[reset_env_ids].clone()
             self.recorder_manager.record_pre_reset(reset_env_ids)
             self._reset_idx(reset_env_ids)
             if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
@@ -653,13 +652,18 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         if reward_term_name in self.reward_manager.active_terms and hasattr(self, "_roboduet_reward_term_names"):
             self._log_roboduet_reward_terms(episode_dict, done_mask, write_episode=False)
 
-        if prev_sampled_target_pos_b is not None and prev_target_pos_w is not None and hasattr(self.cfg.commands, "ee_pose"):
+        if (
+            prev_sampled_target_pos_b_done is not None
+            and prev_target_pos_w_done is not None
+            and done_episode_lengths is not None
+            and hasattr(self.cfg.commands, "ee_pose")
+        ):
             self._accumulate_done_episode_stats(
                 episode_dict,
-                done_mask=done_mask,
-                prev_episode_length_buf=prev_episode_length_buf,
-                prev_sampled_target_pos_b=prev_sampled_target_pos_b,
-                prev_target_pos_w=prev_target_pos_w,
+                done_ids=reset_env_ids,
+                done_episode_lengths=done_episode_lengths,
+                done_sampled_target_pos_b=prev_sampled_target_pos_b_done,
+                done_target_pos_w=prev_target_pos_w_done,
                 terminal_tracking_errors=terminal_tracking_errors,
             )
         self._log_final_termination_terms(episode_dict, terminated=terminated, truncated=truncated)
