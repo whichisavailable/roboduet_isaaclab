@@ -48,6 +48,18 @@ def _set_reward_term_overrides(term_cfg) -> None:
         params["ee_body_cfg"] = SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME])
 
 
+def _set_term_params(term_cfg, params: dict) -> None:
+    if term_cfg is None or not hasattr(term_cfg, "params"):
+        return
+    term_cfg.params = params
+
+
+def _set_term_param_item(term_cfg, key: str, value) -> None:
+    if term_cfg is None or not hasattr(term_cfg, "params"):
+        return
+    term_cfg.params[key] = value
+
+
 def apply_roboduet_go2piper_overrides(env_cfg) -> None:
     env_cfg.roboduet_urdf_mode = "roboduet_go2piper"
     env_cfg.roboduet_arm_joint_names = ROBODUET_GO2PIPER_ARM_JOINT_NAMES
@@ -70,31 +82,33 @@ def apply_roboduet_go2piper_overrides(env_cfg) -> None:
         env_cfg.commands.ee_pose.ee_body_name = ROBODUET_GO2PIPER_EE_BODY_NAME
 
     if hasattr(env_cfg.observations, "arm_policy") and env_cfg.observations.arm_policy is not None:
-        if hasattr(env_cfg.observations.arm_policy, "joint_pos"):
-            env_cfg.observations.arm_policy.joint_pos.params = {
-                "asset_cfg": SceneEntityCfg(
-                    "robot", joint_names=ROBODUET_GO2PIPER_ARM_JOINT_NAMES, preserve_order=True
-                )
-            }
-    if hasattr(env_cfg.observations, "arm_privileged") and env_cfg.observations.arm_privileged is not None:
-        if hasattr(env_cfg.observations.arm_privileged, "lpy"):
-            env_cfg.observations.arm_privileged.lpy.params = {
-                "asset_cfg": SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME])
-            }
-        if hasattr(env_cfg.observations.arm_privileged, "ee_quat_in_base"):
-            env_cfg.observations.arm_privileged.ee_quat_in_base.params = {
-                "asset_cfg": SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME])
-            }
-
-    if hasattr(env_cfg.events, "randomize_apply_external_force_torque_ee"):
-        env_cfg.events.randomize_apply_external_force_torque_ee.params["asset_cfg"] = SceneEntityCfg(
-            "robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME]
+        _set_term_params(
+            getattr(env_cfg.observations.arm_policy, "joint_pos", None),
+            {"asset_cfg": SceneEntityCfg("robot", joint_names=ROBODUET_GO2PIPER_ARM_JOINT_NAMES, preserve_order=True)},
         )
-    if hasattr(env_cfg.events, "randomize_reset_joints"):
-        env_cfg.events.randomize_reset_joints.params["asset_cfg"] = SceneEntityCfg(
+    if hasattr(env_cfg.observations, "arm_privileged") and env_cfg.observations.arm_privileged is not None:
+        _set_term_params(
+            getattr(env_cfg.observations.arm_privileged, "lpy", None),
+            {"asset_cfg": SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME])},
+        )
+        _set_term_params(
+            getattr(env_cfg.observations.arm_privileged, "ee_quat_in_base", None),
+            {"asset_cfg": SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME])},
+        )
+
+    _set_term_param_item(
+        getattr(env_cfg.events, "randomize_apply_external_force_torque_ee", None),
+        "asset_cfg",
+        SceneEntityCfg("robot", body_names=[ROBODUET_GO2PIPER_EE_BODY_NAME]),
+    )
+    _set_term_param_item(
+        getattr(env_cfg.events, "randomize_reset_joints", None),
+        "asset_cfg",
+        SceneEntityCfg(
             "robot",
             joint_names=list(GO2ARM_LEG_JOINT_NAMES) + list(ROBODUET_GO2PIPER_ARM_JOINT_NAMES),
-        )
+        ),
+    )
 
     for reward_term_name in list(HYBRID_REWARD_SCALES.keys()) + ["total_reward"]:
         reward_term_cfg = getattr(env_cfg.rewards, reward_term_name, None)
