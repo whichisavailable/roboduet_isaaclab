@@ -24,7 +24,6 @@ ROBODUET_GO2PIPER_EE_BODY_NAME = "piper_link6"
 ROBODUET_GO2PIPER_COLLISION_BODY_REGEX = [
     r"^base$",
     r"^trunk$",
-    r".*Head.*",
     r".*thigh.*",
     r".*calf.*",
     r".*piper.*",
