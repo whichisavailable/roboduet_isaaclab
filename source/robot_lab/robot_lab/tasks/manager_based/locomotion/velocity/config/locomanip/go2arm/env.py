@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 
 import torch
 
@@ -61,6 +62,28 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self._go2arm_leg_joint_ids, _ = self.scene["robot"].find_joints(GO2ARM_LEG_JOINT_NAMES, preserve_order=True)
         self._configure_roboduet_motor_randomization(cfg)
         self._configure_roboduet_gravity_randomization(cfg)
+        self._roboduet_step_profile_enabled = bool(getattr(cfg, "roboduet_profile_collection", False))
+        self._roboduet_step_profile_sync_cuda = bool(getattr(cfg, "roboduet_profile_sync_cuda", True))
+        self._roboduet_step_profile_totals: dict[str, float] = {}
+        self._roboduet_step_profile_count = 0
+
+    def _roboduet_profile_sync(self) -> None:
+        if self._roboduet_step_profile_sync_cuda and self.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize(torch.device(self.device))
+
+    def _roboduet_profile_stamp(self) -> float:
+        self._roboduet_profile_sync()
+        return time.perf_counter()
+
+    def _roboduet_profile_add(self, key: str, duration_s: float) -> None:
+        self._roboduet_step_profile_totals[key] = self._roboduet_step_profile_totals.get(key, 0.0) + float(duration_s)
+
+    def consume_roboduet_step_profile(self) -> tuple[dict[str, float], int]:
+        totals = dict(self._roboduet_step_profile_totals)
+        count = int(self._roboduet_step_profile_count)
+        self._roboduet_step_profile_totals.clear()
+        self._roboduet_step_profile_count = 0
+        return totals, count
 
     def _configure_roboduet_motor_randomization(self, cfg) -> None:
         robot = self.scene["robot"]
@@ -505,6 +528,11 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         return reasons
 
     def step(self, action: torch.Tensor):
+        profile_enabled = bool(self._roboduet_step_profile_enabled)
+        if profile_enabled:
+            step_start = self._roboduet_profile_stamp()
+            section_start = step_start
+
         self._roboduet_reward_step_cache = None
         self.action_manager.prev_prev_action = self.action_manager.prev_action.clone()
         prev_episode_length_buf = self.episode_length_buf.clone()
@@ -520,6 +548,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
 
         self.action_manager.process_action(action.to(self.device))
         self.recorder_manager.record_pre_step()
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("action", section_end - section_start)
+            section_start = section_end
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
 
         for _ in range(self.cfg.decimation):
@@ -533,6 +565,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
                 self.sim.render()
             self.scene.update(dt=self.physics_dt)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("sim", section_end - section_start)
+            section_start = section_end
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
@@ -542,14 +578,26 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         )[0]
         self._randomize_roboduet_motor_props(motor_rand_ids)
         self._update_roboduet_gravity_randomization()
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("command", section_end - section_start)
+            section_start = section_end
         self.reset_buf = self.termination_manager.compute()
         self.reset_terminated = self.termination_manager.terminated
         self.reset_time_outs = self.termination_manager.time_outs
         self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("reward_termination", section_end - section_start)
+            section_start = section_end
 
         if len(self.recorder_manager.active_terms) > 0:
             self.obs_buf = self.observation_manager.compute()
             self.recorder_manager.record_post_step()
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("observation_recorder", section_end - section_start)
+            section_start = section_end
 
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
@@ -559,10 +607,22 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
                 for _ in range(self.cfg.num_rerenders_on_reset):
                     self.sim.render()
             self.recorder_manager.record_post_reset(reset_env_ids)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("reset", section_end - section_start)
+            section_start = section_end
 
         if "interval" in self.event_manager.available_modes:
             self.event_manager.apply(mode="interval", dt=self.step_dt)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("events", section_end - section_start)
+            section_start = section_end
         self.obs_buf = self.observation_manager.compute(update_history=True)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("observation_final", section_end - section_start)
+            section_start = section_end
 
         obs = self.obs_buf
         rew = self.reward_buf
@@ -620,5 +680,10 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             self._reward_log_counter = 0
 
         extras["episode"] = self._filter_episode_log_dict(episode_dict)
+        if profile_enabled:
+            section_end = self._roboduet_profile_stamp()
+            self._roboduet_profile_add("bookkeeping", section_end - section_start)
+            self._roboduet_profile_add("total", section_end - step_start)
+            self._roboduet_step_profile_count += 1
 
         return obs, rew, terminated, truncated, extras

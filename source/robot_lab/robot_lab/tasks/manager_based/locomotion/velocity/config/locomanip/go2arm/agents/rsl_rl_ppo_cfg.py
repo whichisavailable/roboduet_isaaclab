@@ -78,6 +78,9 @@ class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlBaseRunnerCfg):
     save_interval: int = 400
     seed: int = 42
     empirical_normalization: bool = False
+    roboduet_profile_collection: bool = True
+    roboduet_profile_interval: int = 20
+    roboduet_profile_sync_cuda: bool = True
     experiment_name: str = "roboduet_go2arm_rough"
     run_name: str = ""
     clip_actions: float | None = 10.0

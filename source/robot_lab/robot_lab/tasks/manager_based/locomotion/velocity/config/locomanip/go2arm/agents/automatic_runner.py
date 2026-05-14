@@ -137,6 +137,9 @@ class RoboDuetAutomaticRunner:
         self.gpu_world_size = 1
         self.gpu_global_rank = 0
         self.is_distributed = False
+        self.profile_collection_enabled = bool(self.cfg.get("roboduet_profile_collection", False))
+        self.profile_interval = max(1, int(self.cfg.get("roboduet_profile_interval", 20)))
+        self.profile_sync_cuda = bool(self.cfg.get("roboduet_profile_sync_cuda", True))
 
         obs = self.env.get_observations()
         self.dog_obs_dim = int(obs["dog_policy"].shape[-1])
@@ -239,6 +242,7 @@ class RoboDuetAutomaticRunner:
             gpu_global_rank=self.gpu_global_rank,
             device=self.device,
         )
+        self._set_env_step_profile(enabled=False)
 
         self.env.reset()
 
@@ -374,6 +378,101 @@ class RoboDuetAutomaticRunner:
 
     def _command_term(self):
         return self.env.unwrapped.command_manager.get_term("roboduet")
+
+    def _profile_sync(self) -> None:
+        if self.profile_sync_cuda and str(self.device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize(torch.device(self.device))
+
+    def _profile_stamp(self) -> float:
+        self._profile_sync()
+        return time.perf_counter()
+
+    @staticmethod
+    def _profile_add(store: dict[str, float], key: str, duration_s: float) -> None:
+        store[key] = store.get(key, 0.0) + float(duration_s)
+
+    def _set_env_step_profile(self, enabled: bool) -> None:
+        raw_env = self.env.unwrapped
+        setattr(raw_env, "_roboduet_step_profile_enabled", bool(enabled))
+        setattr(raw_env, "_roboduet_step_profile_sync_cuda", bool(self.profile_sync_cuda))
+
+    def _should_profile_iteration(self, it: int, start_it: int) -> bool:
+        if not self.profile_collection_enabled:
+            return False
+        return (int(it) - int(start_it)) % self.profile_interval == 0
+
+    def _emit_collection_profile(
+        self,
+        it: int,
+        rollout_steps: int,
+        collect_time: float,
+        runner_profile: dict[str, float],
+        env_profile_totals: dict[str, float],
+        env_profile_count: int,
+    ) -> None:
+        step_keys = (
+            "runner_arm_act",
+            "runner_dog_obs",
+            "runner_dog_act",
+            "runner_env_step",
+            "runner_logging",
+            "runner_dog_storage",
+            "runner_arm_storage",
+            "runner_post_step_obs",
+        )
+        iter_keys = ("runner_initial_obs", "runner_bootstrap", "runner_returns")
+        runner_parts = []
+        for key in step_keys:
+            if key in runner_profile:
+                avg_ms = runner_profile[key] * 1000.0 / float(max(rollout_steps, 1))
+                runner_parts.append(f"{key.replace('runner_', '')}={avg_ms:.3f}ms")
+        for key in iter_keys:
+            if key in runner_profile:
+                total_ms = runner_profile[key] * 1000.0
+                runner_parts.append(f"{key.replace('runner_', '')}={total_ms:.3f}ms_total")
+
+        env_parts = []
+        if env_profile_count > 0:
+            for key in (
+                "action",
+                "sim",
+                "command",
+                "reward_termination",
+                "observation_recorder",
+                "reset",
+                "events",
+                "observation_final",
+                "bookkeeping",
+                "total",
+            ):
+                if key in env_profile_totals:
+                    avg_ms = env_profile_totals[key] * 1000.0 / float(env_profile_count)
+                    env_parts.append(f"{key}={avg_ms:.3f}ms")
+
+        print(
+            f"[ROBODUET PROFILE] iter={it} collect={collect_time:.3f}s "
+            f"steps={rollout_steps} env_steps={env_profile_count}"
+        )
+        if runner_parts:
+            print("[ROBODUET PROFILE] runner " + ", ".join(runner_parts))
+        if env_parts:
+            print("[ROBODUET PROFILE] env    " + ", ".join(env_parts))
+
+        writer = self.logger.writer
+        if writer is not None:
+            writer.add_scalar("PerfProfile/collection_time", collect_time, it)
+            for key, value in runner_profile.items():
+                if key in step_keys:
+                    writer.add_scalar(
+                        f"PerfProfile/{key}_ms_per_step", value * 1000.0 / float(max(rollout_steps, 1)), it
+                    )
+                else:
+                    writer.add_scalar(f"PerfProfile/{key}_ms_total", value * 1000.0, it)
+            if env_profile_count > 0:
+                for key, value in env_profile_totals.items():
+                    writer.add_scalar(
+                        f"PerfProfile/env_{key}_ms_per_step", value * 1000.0 / float(env_profile_count), it
+                    )
 
     def _resolve_dog_policy_command_slice(self) -> slice | None:
         fixed_dims = 3 + 5 + 6 + 2 + 4
@@ -516,17 +615,30 @@ class RoboDuetAutomaticRunner:
         total_it = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, total_it):
             arm_rollout_active = bool(self._command_term().switch_open)
+            profile_iteration = self._should_profile_iteration(it, start_it)
+            runner_profile: dict[str, float] = {}
+            self._set_env_step_profile(enabled=profile_iteration)
             rollout_obs = None
             if arm_rollout_active:
+                if profile_iteration:
+                    profile_start = self._profile_stamp()
                 rollout_obs = self.env.get_observations()
                 arm_obs_dict = self._get_arm_observations(rollout_obs)
+                if profile_iteration:
+                    self._profile_add(runner_profile, "runner_initial_obs", self._profile_stamp() - profile_start)
             elif dog_obs_dict is None:
+                if profile_iteration:
+                    profile_start = self._profile_stamp()
                 dog_obs_dict = self._get_dog_observations()
+                if profile_iteration:
+                    self._profile_add(runner_profile, "runner_initial_obs", self._profile_stamp() - profile_start)
 
             rollout_start_time = time.perf_counter()
             with torch.inference_mode():
                 for rollout_step in range(num_steps_per_env):
                     if arm_rollout_active:
+                        if profile_iteration:
+                            profile_start = self._profile_stamp()
                         actions_arm_cd = self.alg_arm.act(
                             arm_obs_dict["obs"],
                             arm_obs_dict["privileged_obs"],
@@ -534,31 +646,59 @@ class RoboDuetAutomaticRunner:
                         )
                         self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
                         arm_actions = actions_arm_cd[:, : self.arm_action_dim]
+                        if profile_iteration:
+                            self._profile_add(runner_profile, "runner_arm_act", self._profile_stamp() - profile_start)
+                            profile_start = self._profile_stamp()
                         dog_obs_dict = self._get_dog_observations_from_cached_obs(rollout_obs)
+                        if profile_iteration:
+                            self._profile_add(runner_profile, "runner_dog_obs", self._profile_stamp() - profile_start)
                     else:
                         arm_actions = self.fake_arm_actions
 
+                    if profile_iteration:
+                        profile_start = self._profile_stamp()
                     actions_dog = self.alg_dog.act(
                         dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
                     )
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_dog_act", self._profile_stamp() - profile_start)
+                        profile_start = self._profile_stamp()
                     obs, rewards_dog, rewards_arm, dones, extras = self._step_env(actions_dog, arm_actions)
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_env_step", self._profile_stamp() - profile_start)
+                        profile_start = self._profile_stamp()
                     self.logger.process_env_step(rewards_dog, dones, extras)
                     self._process_arm_reward_step(rewards_arm, dones)
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_logging", self._profile_stamp() - profile_start)
+                        profile_start = self._profile_stamp()
                     self.alg_dog.process_env_step(rewards_dog, dones, extras)
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_dog_storage", self._profile_stamp() - profile_start)
 
                     if arm_rollout_active:
                         rollout_obs = obs
+                        if profile_iteration:
+                            profile_start = self._profile_stamp()
                         self.alg_arm.process_env_step(rewards_arm, dones, extras)
+                        if profile_iteration:
+                            self._profile_add(runner_profile, "runner_arm_storage", self._profile_stamp() - profile_start)
 
                     done_env_ids = dones.nonzero(as_tuple=False).flatten()
+                    if profile_iteration:
+                        profile_start = self._profile_stamp()
                     self._clear_cached(done_env_ids)
                     if arm_rollout_active:
                         arm_obs_dict = self._get_arm_observations(rollout_obs)
                     else:
                         dog_obs_dict = self._get_dog_observations(obs)
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_post_step_obs", self._profile_stamp() - profile_start)
 
                 collect_time = time.perf_counter() - rollout_start_time
                 if arm_rollout_active:
+                    if profile_iteration:
+                        profile_start = self._profile_stamp()
                     actions_arm_cd = self.alg_arm.act(
                         arm_obs_dict["obs"],
                         arm_obs_dict["privileged_obs"],
@@ -566,8 +706,18 @@ class RoboDuetAutomaticRunner:
                     )
                     self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
                     dog_obs_dict = self._get_dog_observations_from_cached_obs(rollout_obs)
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_bootstrap", self._profile_stamp() - profile_start)
+                        profile_start = self._profile_stamp()
                     self.alg_arm.compute_returns(arm_obs_dict["obs_history"], arm_obs_dict["privileged_obs"])
+                    if profile_iteration:
+                        self._profile_add(runner_profile, "runner_returns", self._profile_stamp() - profile_start)
+                        profile_start = self._profile_stamp()
+                elif profile_iteration:
+                    profile_start = self._profile_stamp()
                 self.alg_dog.compute_returns(dog_obs_dict["obs_history"], dog_obs_dict["privileged_obs"])
+                if profile_iteration:
+                    self._profile_add(runner_profile, "runner_returns", self._profile_stamp() - profile_start)
 
             update_start_time = time.perf_counter()
             if arm_rollout_active:
@@ -603,6 +753,16 @@ class RoboDuetAutomaticRunner:
                 },
                 rnd_weight=None,
             )
+            if profile_iteration:
+                env_profile_totals, env_profile_count = self.env.unwrapped.consume_roboduet_step_profile()
+                self._emit_collection_profile(
+                    it=it,
+                    rollout_steps=num_steps_per_env,
+                    collect_time=collect_time,
+                    runner_profile=runner_profile,
+                    env_profile_totals=env_profile_totals,
+                    env_profile_count=env_profile_count,
+                )
             self._log_roboduet_scalars(it)
 
             if self.log_dir is not None and it % int(self.cfg["save_interval"]) == 0:
