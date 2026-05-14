@@ -3024,13 +3024,20 @@ def _compute_roboduet_reward_state(
     reward_neg_arm_scaled = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
     zero_reward = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
 
-    foot_kinematics = None
+    foot_body_positions_w = None
+    foot_body_lin_vel_w = None
 
-    def get_foot_kinematics() -> dict[str, torch.Tensor]:
-        nonlocal foot_kinematics
-        if foot_kinematics is None:
-            foot_kinematics = _get_go2arm_foot_kinematics(env, foot_asset_cfg)
-        return foot_kinematics
+    def get_foot_body_positions_w() -> torch.Tensor:
+        nonlocal foot_body_positions_w
+        if foot_body_positions_w is None:
+            foot_body_positions_w = robot.data.body_pos_w[:, foot_asset_cfg.body_ids, :]
+        return foot_body_positions_w
+
+    def get_foot_body_lin_vel_w() -> torch.Tensor:
+        nonlocal foot_body_lin_vel_w
+        if foot_body_lin_vel_w is None:
+            foot_body_lin_vel_w = robot.data.body_lin_vel_w[:, foot_asset_cfg.body_ids, :]
+        return foot_body_lin_vel_w
 
     foot_force_vectors = None
     foot_force_norms = None
@@ -3043,7 +3050,7 @@ def _compute_roboduet_reward_state(
     ) or has_ever_active("feet_slip"):
         foot_force_vectors = get_go2arm_precise_foot_contact_forces(env, foot_sensor_cfg)
         if foot_force_vectors is None:
-            raise RuntimeError("RoboDuet reward requires the dedicated foot sensors.")
+            raise RuntimeError("RoboDuet reward requires the shared `contact_forces` sensor to expose all four feet.")
         foot_force_norms = torch.linalg.norm(foot_force_vectors, dim=-1)
         foot_force_z = foot_force_vectors[..., 2]
 
@@ -3100,7 +3107,7 @@ def _compute_roboduet_reward_state(
                 last_foot_contacts = torch.zeros_like(foot_contacts)
                 env._roboduet_last_foot_contacts = last_foot_contacts
             if has_active("feet_slip"):
-                foot_velocities_xy = get_foot_kinematics()["foot_center_lin_vel_w"][..., :2]
+                foot_velocities_xy = get_foot_body_lin_vel_w()[..., :2]
                 contact_filter = torch.logical_or(foot_contacts, last_foot_contacts)
                 metrics["feet_slip"] = torch.sum(
                     contact_filter.float() * torch.sum(torch.square(foot_velocities_xy), dim=2),
@@ -3109,16 +3116,15 @@ def _compute_roboduet_reward_state(
             last_foot_contacts.copy_(foot_contacts.detach())
 
         if has_active("feet_clearance_cmd_linear"):
-            foot_kinematics_data = get_foot_kinematics()
             phases = 1.0 - torch.abs(1.0 - torch.clamp((term.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
             ground_height_data = _get_go2arm_ground_height_data(env, GO2ARM_FOOT_SCANNER_NAMES)
-            foot_center_height = foot_kinematics_data["foot_sphere_centers_w"][..., 2]
+            foot_body_height = get_foot_body_positions_w()[..., 2]
             ground_height = torch.where(
                 ground_height_data["is_valid"],
                 ground_height_data["ground_height_w"],
-                torch.zeros_like(foot_center_height),
+                torch.zeros_like(foot_body_height),
             )
-            foot_height = foot_center_height - ground_height
+            foot_height = foot_body_height - ground_height
             target_height = 0.04 * phases + 0.02
             metrics["feet_clearance_cmd_linear"] = torch.sum(
                 torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
@@ -3131,7 +3137,7 @@ def _compute_roboduet_reward_state(
             ) / 4.0
 
         if has_active("tracking_contacts_shaped_vel"):
-            foot_velocities = get_foot_kinematics()["foot_center_lin_vel_w"]
+            foot_velocities = get_foot_body_lin_vel_w()
             metrics["tracking_contacts_shaped_vel"] = -torch.sum(
                 desired_contact * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
                 dim=1,
@@ -3363,7 +3369,7 @@ def _compute_roboduet_reward_state(
         metrics["dof_pos_limits"] = torch.sum(out_of_limits, dim=1)
 
     if has_active("raibert_heuristic"):
-        foot_pos_w = get_foot_kinematics()["foot_sphere_centers_w"]
+        foot_pos_w = get_foot_body_positions_w()
         cur_footsteps_translated = foot_pos_w - robot.data.root_link_pos_w.unsqueeze(1)
         root_yaw_inv = yaw_quat(math_utils.quat_conjugate(robot.data.root_link_quat_w))
         footsteps_in_body_frame = math_utils.quat_apply(
