@@ -890,7 +890,9 @@ class RoboDuetCommand(CommandTerm):
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.base_body_idx = self.robot.body_names.index(cfg.base_body_name)
         self.ee_body_idx = self.robot.body_names.index(cfg.ee_body_name)
-        self.command_buffer = torch.zeros(self.num_envs, 11, device=self.device)
+        # Keep the preallocated command buffer aligned with the original concatenation:
+        # scaled dog velocity commands (3) + arm command obs (6) + gait clock inputs (4).
+        self.command_buffer = torch.zeros(self.num_envs, 13, device=self.device)
         self.commands_dog = torch.zeros(self.num_envs, 5, device=self.device)
         self.commands_arm = torch.zeros(self.num_envs, 3, device=self.device)
         self.commands_arm_obs = torch.zeros(self.num_envs, 6, device=self.device)
@@ -990,7 +992,7 @@ class RoboDuetCommand(CommandTerm):
             self.command_buffer[:, 3:9].copy_(self.commands_arm_obs)
         else:
             self.command_buffer[:, 3:9].copy_(self._zero_arm_command_obs)
-        self.command_buffer[:, 9:].copy_(self.clock_inputs)
+        self.command_buffer[:, 9:13].copy_(self.clock_inputs)
  
     def _resample_command(self, env_ids: Sequence[int]):
         self._resample_locomotion_commands(torch.as_tensor(env_ids, dtype=torch.long, device=self.device))

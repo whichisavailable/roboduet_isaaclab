@@ -20,12 +20,14 @@ from .callable_resolver import resolve_callable
 from .logger_compat import Logger
 
 
-def _append_obs_history(history: torch.Tensor, obs: torch.Tensor, obs_dim: int) -> torch.Tensor:
-    """Append the latest observation into a preallocated flattened history buffer."""
+def _append_obs_history(
+    history: torch.Tensor, history_scratch: torch.Tensor, obs: torch.Tensor, obs_dim: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Append the latest observation into a flattened history buffer without overlapping copies."""
     if history.shape[-1] > obs_dim:
-        history[:, :-obs_dim].copy_(history[:, obs_dim:])
-    history[:, -obs_dim:].copy_(obs)
-    return history
+        history_scratch[:, :-obs_dim].copy_(history[:, obs_dim:])
+    history_scratch[:, -obs_dim:].copy_(obs)
+    return history_scratch, history
 
 
 class RoboDuetAutomaticInferencePolicy(nn.Module):
@@ -57,6 +59,8 @@ class RoboDuetAutomaticInferencePolicy(nn.Module):
         self.arm_obs_dim = None
         self.dog_obs_history = None
         self.arm_obs_history = None
+        self.dog_obs_history_scratch = None
+        self.arm_obs_history_scratch = None
 
     def _ensure_histories(self, obs):
         if self.dog_obs_dim is None:
@@ -65,31 +69,41 @@ class RoboDuetAutomaticInferencePolicy(nn.Module):
             self.dog_obs_history = torch.zeros(
                 obs["dog_policy"].shape[0], self.dog_obs_dim * self.dog_history_length, device=obs["dog_policy"].device
             )
+            self.dog_obs_history_scratch = torch.zeros_like(self.dog_obs_history)
             self.arm_obs_history = torch.zeros(
                 obs["arm_policy"].shape[0], self.arm_obs_dim * self.arm_history_length, device=obs["arm_policy"].device
             )
+            self.arm_obs_history_scratch = torch.zeros_like(self.arm_obs_history)
 
     def reset(self, dones: torch.Tensor | None = None):
         if dones is None:
             if self.dog_obs_history is not None:
                 self.dog_obs_history.zero_()
+                self.dog_obs_history_scratch.zero_()
             if self.arm_obs_history is not None:
                 self.arm_obs_history.zero_()
+                self.arm_obs_history_scratch.zero_()
             return
         env_ids = dones.nonzero(as_tuple=False).flatten()
         if env_ids.numel() == 0:
             return
         if self.dog_obs_history is not None:
             self.dog_obs_history[env_ids] = 0.0
+            self.dog_obs_history_scratch[env_ids] = 0.0
         if self.arm_obs_history is not None:
             self.arm_obs_history[env_ids] = 0.0
+            self.arm_obs_history_scratch[env_ids] = 0.0
 
     def act_inference(self, obs):
         self._ensure_histories(obs)
         dog_obs = obs["dog_policy"]
         arm_obs = obs["arm_policy"]
-        _append_obs_history(self.dog_obs_history, dog_obs, self.dog_obs_dim)
-        _append_obs_history(self.arm_obs_history, arm_obs, self.arm_obs_dim)
+        self.dog_obs_history, self.dog_obs_history_scratch = _append_obs_history(
+            self.dog_obs_history, self.dog_obs_history_scratch, dog_obs, self.dog_obs_dim
+        )
+        self.arm_obs_history, self.arm_obs_history_scratch = _append_obs_history(
+            self.arm_obs_history, self.arm_obs_history_scratch, arm_obs, self.arm_obs_dim
+        )
 
         command_term = self.env.unwrapped.command_manager.get_term("roboduet")
         with torch.inference_mode():
@@ -190,9 +204,11 @@ class RoboDuetAutomaticRunner:
         self.dog_obs_history = torch.zeros(
             self.env.num_envs, self.dog_obs_dim * self.dog_history_length, device=self.device
         )
+        self.dog_obs_history_scratch = torch.zeros_like(self.dog_obs_history)
         self.arm_obs_history = torch.zeros(
             self.env.num_envs, self.arm_obs_dim * self.arm_history_length, device=self.device
         )
+        self.arm_obs_history_scratch = torch.zeros_like(self.arm_obs_history)
         self.fake_arm_actions = torch.zeros(self.env.num_envs, self.arm_action_dim, device=self.device)
         self.full_action = torch.zeros(
             self.env.num_envs, self.dog_action_dim + self.arm_action_dim, device=self.device
@@ -362,7 +378,9 @@ class RoboDuetAutomaticRunner:
         if env_ids.numel() == 0:
             return
         self.dog_obs_history[env_ids] = 0.0
+        self.dog_obs_history_scratch[env_ids] = 0.0
         self.arm_obs_history[env_ids] = 0.0
+        self.arm_obs_history_scratch[env_ids] = 0.0
 
     def _get_dog_observations(self, obs: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
         if obs is None:
@@ -372,7 +390,9 @@ class RoboDuetAutomaticRunner:
         else:
             dog_obs = obs["dog_policy"].to(self.device)
             dog_privileged = obs["dog_privileged"].to(self.device)
-        _append_obs_history(self.dog_obs_history, dog_obs, self.dog_obs_dim)
+        self.dog_obs_history, self.dog_obs_history_scratch = _append_obs_history(
+            self.dog_obs_history, self.dog_obs_history_scratch, dog_obs, self.dog_obs_dim
+        )
         return {"obs": dog_obs, "privileged_obs": dog_privileged, "obs_history": self.dog_obs_history}
 
     def _get_arm_observations(self, obs: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
@@ -383,7 +403,9 @@ class RoboDuetAutomaticRunner:
         else:
             arm_obs = obs["arm_policy"].to(self.device)
             arm_privileged = obs["arm_privileged"].to(self.device)
-        _append_obs_history(self.arm_obs_history, arm_obs, self.arm_obs_dim)
+        self.arm_obs_history, self.arm_obs_history_scratch = _append_obs_history(
+            self.arm_obs_history, self.arm_obs_history_scratch, arm_obs, self.arm_obs_dim
+        )
         return {"obs": arm_obs, "privileged_obs": arm_privileged, "obs_history": self.arm_obs_history}
 
     def _step_env(self, dog_actions: torch.Tensor, arm_actions: torch.Tensor):
