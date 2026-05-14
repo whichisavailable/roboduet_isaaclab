@@ -171,7 +171,9 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     roboduet_randomize_motor_offset: bool = True
     roboduet_motor_offset_range: tuple[float, float] = (-0.02, 0.02)
     roboduet_motor_randomization_interval_s: float = 4.0
-    roboduet_friction_normalization_range: tuple[float, float] = (0.05, 4.5)
+    # Upstream `config_wtw()` overrides normalization.friction_range to [0, 1].
+    # Keep the arm/dog adaptation target on that exact scale.
+    roboduet_friction_normalization_range: tuple[float, float] = (0.0, 1.0)
     roboduet_restitution_normalization_range: tuple[float, float] = (0.0, 1.0)
     episode_log_key_prefixes: tuple[str, ...] = (
         "rew_",

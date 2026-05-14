@@ -899,7 +899,7 @@ def _roboduet_scale_shift(
 def roboduet_privileged_friction(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     sampled = getattr(env, "_roboduet_friction_coeffs", None)
     norm_range = tuple(
-        float(v) for v in getattr(getattr(env, "cfg", None), "roboduet_friction_normalization_range", (0.05, 4.5))
+        float(v) for v in getattr(getattr(env, "cfg", None), "roboduet_friction_normalization_range", (0.0, 1.0))
     )
     if sampled is not None:
         return _roboduet_scale_shift(sampled, norm_range)
