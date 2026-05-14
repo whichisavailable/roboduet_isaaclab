@@ -162,6 +162,7 @@ class RoboDuetAutomaticRunner:
         self.arm_action_dim = int(arm_cfg.pop("num_actions"))
         self.num_plan_actions = int(arm_cfg.pop("num_plan_actions"))
         self.arm_action_total_dim = self.arm_action_dim + self.num_plan_actions
+        self._dog_policy_command_slice = self._resolve_dog_policy_command_slice()
 
         self.dog_model: DogActorCritic = dog_model_class(
             num_obs=self.dog_obs_dim,
@@ -374,6 +375,14 @@ class RoboDuetAutomaticRunner:
     def _command_term(self):
         return self.env.unwrapped.command_manager.get_term("roboduet")
 
+    def _resolve_dog_policy_command_slice(self) -> slice | None:
+        fixed_dims = 3 + 5 + 6 + 2 + 4
+        variable_dims = self.dog_obs_dim - fixed_dims
+        if variable_dims != 3 * self.dog_action_dim:
+            return None
+        command_start = 3 + variable_dims
+        return slice(command_start, command_start + 5)
+
     def _clear_cached(self, env_ids: torch.Tensor):
         if env_ids.numel() == 0:
             return
@@ -390,6 +399,18 @@ class RoboDuetAutomaticRunner:
         else:
             dog_obs = obs["dog_policy"].to(self.device)
             dog_privileged = obs["dog_privileged"].to(self.device)
+        self.dog_obs_history, self.dog_obs_history_scratch = _append_obs_history(
+            self.dog_obs_history, self.dog_obs_history_scratch, dog_obs, self.dog_obs_dim
+        )
+        return {"obs": dog_obs, "privileged_obs": dog_privileged, "obs_history": self.dog_obs_history}
+
+    def _get_dog_observations_from_cached_obs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if self._dog_policy_command_slice is None:
+            return self._get_dog_observations()
+        dog_obs = obs["dog_policy"].to(self.device)
+        term = self._command_term()
+        dog_obs[:, self._dog_policy_command_slice].copy_(term.commands_dog * term.commands_scale_dog)
+        dog_privileged = obs["dog_privileged"].to(self.device)
         self.dog_obs_history, self.dog_obs_history_scratch = _append_obs_history(
             self.dog_obs_history, self.dog_obs_history_scratch, dog_obs, self.dog_obs_dim
         )
@@ -495,8 +516,10 @@ class RoboDuetAutomaticRunner:
         total_it = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, total_it):
             arm_rollout_active = bool(self._command_term().switch_open)
+            rollout_obs = None
             if arm_rollout_active:
-                arm_obs_dict = self._get_arm_observations()
+                rollout_obs = self.env.get_observations()
+                arm_obs_dict = self._get_arm_observations(rollout_obs)
             elif dog_obs_dict is None:
                 dog_obs_dict = self._get_dog_observations()
 
@@ -511,7 +534,7 @@ class RoboDuetAutomaticRunner:
                         )
                         self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
                         arm_actions = actions_arm_cd[:, : self.arm_action_dim]
-                        dog_obs_dict = self._get_dog_observations()
+                        dog_obs_dict = self._get_dog_observations_from_cached_obs(rollout_obs)
                     else:
                         arm_actions = self.fake_arm_actions
 
@@ -524,12 +547,13 @@ class RoboDuetAutomaticRunner:
                     self.alg_dog.process_env_step(rewards_dog, dones, extras)
 
                     if arm_rollout_active:
+                        rollout_obs = obs
                         self.alg_arm.process_env_step(rewards_arm, dones, extras)
 
                     done_env_ids = dones.nonzero(as_tuple=False).flatten()
                     self._clear_cached(done_env_ids)
                     if arm_rollout_active:
-                        arm_obs_dict = self._get_arm_observations(obs)
+                        arm_obs_dict = self._get_arm_observations(rollout_obs)
                     else:
                         dog_obs_dict = self._get_dog_observations(obs)
 
@@ -541,7 +565,7 @@ class RoboDuetAutomaticRunner:
                         arm_obs_dict["obs_history"],
                     )
                     self.env.unwrapped.set_plan_actions(actions_arm_cd[:, self.arm_action_dim :])
-                    dog_obs_dict = self._get_dog_observations()
+                    dog_obs_dict = self._get_dog_observations_from_cached_obs(rollout_obs)
                     self.alg_arm.compute_returns(arm_obs_dict["obs_history"], arm_obs_dict["privileged_obs"])
                 self.alg_dog.compute_returns(dog_obs_dict["obs_history"], dog_obs_dict["privileged_obs"])
 
