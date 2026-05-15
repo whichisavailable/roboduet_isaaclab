@@ -3125,7 +3125,7 @@ def _compute_roboduet_reward_state(
                 torch.zeros_like(foot_body_height),
             )
             foot_height = foot_body_height - ground_height
-            target_height = 0.04 * phases + 0.02
+            target_height = 0.06 * phases + 0.02
             metrics["feet_clearance_cmd_linear"] = torch.sum(
                 torch.square(target_height - foot_height) * (1.0 - desired_contact), dim=1
             )

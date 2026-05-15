@@ -282,7 +282,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "hybrid_scales": HYBRID_REWARD_SCALES,
             "only_positive_rewards": False,
             "only_positive_rewards_ji22_style": True,
-            "sigma_rew_neg": 0.02,
+            "sigma_rew_neg": 0.05,
             "tracking_sigma": 0.25,
             "tracking_sigma_yaw": 0.25,
             "gait_force_sigma": 100.0,
