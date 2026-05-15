@@ -3293,7 +3293,11 @@ def _compute_roboduet_reward_state(
         )
 
     if has_active("action_rate"):
-        metrics["action_rate"] = torch.sum(torch.square(prev_action[:, leg_action_ids] - action[:, leg_action_ids]), dim=1)
+        action_rate_valid = (prev_action[:, leg_action_ids] != 0.0).float()
+        metrics["action_rate"] = torch.sum(
+            torch.square(prev_action[:, leg_action_ids] - action[:, leg_action_ids]) * action_rate_valid,
+            dim=1,
+        )
 
     if has_active("action_smoothness_1", "action_smoothness_2", "arm_action_smoothness_1", "arm_action_smoothness_2"):
         last_joint_pos_target = getattr(env, "_go2arm_last_joint_pos_target", None)
