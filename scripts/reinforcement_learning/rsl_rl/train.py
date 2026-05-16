@@ -74,6 +74,12 @@ parser.add_argument(
         "Disabled by default so the current local go2arm URDF remains the training default."
     ),
 )
+parser.add_argument(
+    "--omni",
+    action="store_true",
+    default=False,
+    help="Enable the RoboDuet stage1 omni reward aggregation mode during training.",
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -629,6 +635,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.roboduet_urdf:
         apply_roboduet_go2piper_overrides(env_cfg)
         print("[INFO] RoboDuet URDF override enabled: using upstream auto_train robot=go2 go2piper URDF.")
+    if hasattr(env_cfg, "roboduet_stage1_omni_reward"):
+        env_cfg.roboduet_stage1_omni_reward = bool(args_cli.omni)
+        if args_cli.omni:
+            print("[INFO] RoboDuet omni reward enabled: using stage1 omni total reward aggregation.")
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
