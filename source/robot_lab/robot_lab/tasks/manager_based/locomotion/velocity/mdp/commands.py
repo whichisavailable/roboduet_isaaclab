@@ -22,6 +22,7 @@ from .observations import (
     GO2ARM_BASE_BODY_NAME,
     GO2ARM_COMMAND_CURRICULUM_KEYS,
     GO2ARM_EE_BODY_NAME,
+    GO2ARM_FOOT_BODY_NAMES,
     _quat_to_abg,
 )
 from .utils import is_robot_on_terrain
@@ -911,6 +912,7 @@ class RoboDuetCommand(CommandTerm):
         self.commands_scale_dog = torch.tensor(cfg.commands_scale_dog, device=self.device).unsqueeze(0)
         self._identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
         self._zero_arm_command_obs = torch.zeros_like(self.commands_arm_obs)
+        self._runtime_foot_order_logged = False
         # `switch_open=False` 时只训练/采样 locomotion；打开后再开始采样机械臂目标。
         self.switch_open = False
         self._curriculum = RewardThresholdCurriculum(
@@ -1172,6 +1174,42 @@ class RoboDuetCommand(CommandTerm):
             )
             desired_contact_states.append(desired)
         self.desired_contact_states = torch.stack(desired_contact_states, dim=1)
+        self._maybe_log_runtime_foot_order()
+
+    def _maybe_log_runtime_foot_order(self) -> None:
+        if self._runtime_foot_order_logged:
+            return
+        try:
+            robot_foot_body_ids, robot_foot_body_names = self.robot.find_bodies(GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ROBODUET FOOT ORDER] unable to resolve robot foot order at runtime: {type(exc).__name__}: {exc}")
+            self._runtime_foot_order_logged = True
+            return
+
+        contact_foot_body_names: tuple[str, ...] | None = None
+        contact_sensor = self._env.scene.sensors.get("contact_forces")
+        if contact_sensor is not None:
+            try:
+                _, contact_foot_body_names = contact_sensor.find_bodies(GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
+            except Exception:  # noqa: BLE001
+                contact_foot_body_names = None
+
+        moving_env_ids = torch.where(torch.norm(self.commands_dog[:, :3], dim=1) >= 0.1)[0]
+        env_id = int(moving_env_ids[0].item()) if moving_env_ids.numel() > 0 else 0
+        step = int(getattr(self._env, "common_step_counter", 0))
+        print(
+            "[ROBODUET FOOT ORDER] "
+            f"step={step} env={env_id} "
+            f"labels={tuple(GO2ARM_FOOT_BODY_NAMES)!r} "
+            f"robot_find_bodies={tuple(robot_foot_body_names)!r} "
+            f"robot_body_ids={tuple(int(body_id) for body_id in robot_foot_body_ids)!r} "
+            f"contact_find_bodies={tuple(contact_foot_body_names) if contact_foot_body_names is not None else None!r} "
+            f"foot_indices={self.foot_indices[env_id].detach().cpu().tolist()} "
+            f"clock_inputs={self.clock_inputs[env_id].detach().cpu().tolist()} "
+            f"desired_contact={self.desired_contact_states[env_id].detach().cpu().tolist()} "
+            f"commands_dog={self.commands_dog[env_id, :3].detach().cpu().tolist()}"
+        )
+        self._runtime_foot_order_logged = True
 
 
 RoboDuetCommandCfg.class_type = RoboDuetCommand
