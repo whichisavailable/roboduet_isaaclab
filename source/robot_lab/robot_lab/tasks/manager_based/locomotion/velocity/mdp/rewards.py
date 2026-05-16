@@ -3468,7 +3468,9 @@ def _compute_roboduet_reward_state(
             (tracking_lin_vel_reward + torch.pow(tracking_lin_vel_reward, 5.0)) * tracking_lin_vel_weight
             + (tracking_ang_vel_reward + torch.pow(tracking_ang_vel_reward, 5.0)) * tracking_ang_vel_weight
         ) * reward_dt
-        reward_dog_scaled = (1.0 + reward_pos_dog_omni_scaled) * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))
+        reward_dog_scaled = 0.2 * (1.0 + reward_pos_dog_omni_scaled) * torch.exp(
+            reward_neg_dog_scaled / float(sigma_rew_neg)
+        )
         reward_arm_scaled = reward_pos_arm_scaled * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
     elif only_positive_rewards_ji22_style:
         reward_dog_scaled = reward_pos_dog_scaled * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))

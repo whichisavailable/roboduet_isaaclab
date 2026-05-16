@@ -250,6 +250,7 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self,
         episode_dict: dict[str, float | torch.Tensor],
         done_mask: torch.Tensor,
+        done_episode_lengths: torch.Tensor | None = None,
         write_episode: bool = True,
     ) -> None:
         if not torch.any(done_mask):
@@ -265,6 +266,14 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             values = log_episode_sums[name][done_ids]
             if write_episode:
                 self._accumulate_tensor_mean_log(episode_dict, f"rew_{name}", values, write_episode=True)
+                if name == "total" and done_episode_lengths is not None and done_episode_lengths.numel() == done_ids.numel():
+                    safe_lengths = torch.clamp(done_episode_lengths.to(values.dtype), min=1.0)
+                    self._accumulate_tensor_mean_log(
+                        episode_dict,
+                        "rew_total_per_step",
+                        values / safe_lengths,
+                        write_episode=True,
+                    )
             log_episode_sums[name][done_ids] = 0.0
         command_sums = getattr(self, "_roboduet_command_sums", None)
         if isinstance(command_sums, dict):
@@ -585,7 +594,12 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             # Match upstream RoboDuet logging semantics: `rew_*` in training logs should
             # come from per-episode accumulated reward terms, not from IsaacLab's
             # `Episode_Reward/*` values that are normalized by episode-length seconds.
-            self._log_roboduet_reward_terms(episode_dict, done_mask, write_episode=True)
+            self._log_roboduet_reward_terms(
+                episode_dict,
+                done_mask,
+                done_episode_lengths=done_episode_lengths,
+                write_episode=True,
+            )
 
         if (
             prev_sampled_target_pos_b_done is not None

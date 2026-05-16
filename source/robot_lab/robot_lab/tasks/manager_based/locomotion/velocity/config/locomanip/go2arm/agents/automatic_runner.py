@@ -492,7 +492,7 @@ class RoboDuetAutomaticRunner:
                 writer.add_scalar("Curriculum/x_vel_mean", float(np.dot(probs, x_vel_grid)), it)
                 writer.add_scalar("Curriculum/yaw_vel_mean", float(np.dot(probs, yaw_vel_grid)), it)
                 writer.add_scalar("Curriculum/active_bins", int(np.count_nonzero(weights)), it)
-                writer.add_scalar("Curriculum/max_weight", float(weights.max()), it)
+                writer.add_scalar("Curriculum/min_weight", float(weights.min()), it)
                 x_var = float(np.dot(probs, x_vel_grid**2) - np.dot(probs, x_vel_grid) ** 2)
                 writer.add_scalar("Curriculum/x_vel_std", float(np.sqrt(max(x_var, 0.0))), it)
 
