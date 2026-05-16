@@ -637,6 +637,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] RoboDuet URDF override enabled: using upstream auto_train robot=go2 go2piper URDF.")
     if hasattr(env_cfg, "roboduet_stage1_omni_reward"):
         env_cfg.roboduet_stage1_omni_reward = bool(args_cli.omni)
+        rewards_cfg = getattr(env_cfg, "rewards", None)
+        if rewards_cfg is not None:
+            for term_cfg in vars(rewards_cfg).values():
+                params = getattr(term_cfg, "params", None)
+                if isinstance(params, dict) and "roboduet_stage1_omni_reward" in params:
+                    params["roboduet_stage1_omni_reward"] = env_cfg.roboduet_stage1_omni_reward
         if args_cli.omni:
             print("[INFO] RoboDuet omni reward enabled: using stage1 omni total reward aggregation.")
     # check for invalid combination of CPU device with distributed training
