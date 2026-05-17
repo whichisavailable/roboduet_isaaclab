@@ -125,6 +125,19 @@ class RoboDuetAutomaticInferencePolicy(nn.Module):
 class RoboDuetAutomaticRunner:
     """Custom runner that mirrors Roboduet upstream `auto_train`."""
 
+    _DOG_SYMMETRY_CALLABLE = (
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry.roboduet_go2arm:augment_dog_ppo_batch"
+    )
+    _DOG_SYMMETRY_MIRROR_CALLABLE = (
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry.roboduet_go2arm:mirror_dog_action_mean"
+    )
+    _ARM_SYMMETRY_CALLABLE = (
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry.roboduet_go2arm:augment_arm_ppo_batch"
+    )
+    _ARM_SYMMETRY_MIRROR_CALLABLE = (
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.symmetry.roboduet_go2arm:mirror_arm_action_mean"
+    )
+
     def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
         self.env = env
         self.cfg = train_cfg
@@ -151,10 +164,22 @@ class RoboDuetAutomaticRunner:
         logger_algorithm_cfg.setdefault("rnd_cfg", None)
         self.cfg["algorithm"] = logger_algorithm_cfg
         algorithm_cfg.pop("rnd_cfg", None)
+        dog_algorithm_cfg = dict(algorithm_cfg)
+        arm_algorithm_cfg = dict(algorithm_cfg)
+        if bool(self.cfg.get("symmetry", False)):
+            symmetry_loss_coef = float(self.cfg.get("symmetry_loss_coef", 1.0))
+            dog_algorithm_cfg["symmetry_callable"] = self._DOG_SYMMETRY_CALLABLE
+            dog_algorithm_cfg["symmetry_mirror_callable"] = self._DOG_SYMMETRY_MIRROR_CALLABLE
+            dog_algorithm_cfg["symmetry_loss_coef"] = symmetry_loss_coef
+            arm_algorithm_cfg["symmetry_callable"] = self._ARM_SYMMETRY_CALLABLE
+            arm_algorithm_cfg["symmetry_mirror_callable"] = self._ARM_SYMMETRY_MIRROR_CALLABLE
+            arm_algorithm_cfg["symmetry_loss_coef"] = symmetry_loss_coef
 
         dog_model_class = resolve_callable(dog_cfg.pop("class_name"))
         arm_model_class = resolve_callable(arm_cfg.pop("class_name"))
         algorithm_class = resolve_callable(algorithm_cfg.pop("class_name"))
+        dog_algorithm_cfg.pop("class_name", None)
+        arm_algorithm_cfg.pop("class_name", None)
 
         self.dog_history_length = int(dog_cfg.pop("history_length"))
         self.arm_history_length = int(arm_cfg.pop("history_length"))
@@ -181,7 +206,7 @@ class RoboDuetAutomaticRunner:
         self._configure_stage_switch()
         self._load_pretrained_components()
 
-        self.alg_dog: AutomaticPPO = algorithm_class(self.dog_model, device=self.device, **algorithm_cfg)
+        self.alg_dog: AutomaticPPO = algorithm_class(self.dog_model, device=self.device, **dog_algorithm_cfg)
         self.alg_dog.init_storage(
             self.env.num_envs,
             int(self.cfg["num_steps_per_env"]),
@@ -191,7 +216,7 @@ class RoboDuetAutomaticRunner:
             [self.dog_action_dim],
             [self.dog_action_dim],
         )
-        self.alg_arm: AutomaticPPO = algorithm_class(self.arm_model, device=self.device, **algorithm_cfg)
+        self.alg_arm: AutomaticPPO = algorithm_class(self.arm_model, device=self.device, **arm_algorithm_cfg)
         self.alg_arm.init_storage(
             self.env.num_envs,
             int(self.cfg["num_steps_per_env"]),
@@ -579,10 +604,13 @@ class RoboDuetAutomaticRunner:
             self.current_learning_iteration = it
 
             loss_dict = self._make_loss_dict("dog", dog_loss_tuple)
+            loss_dict["dog/symmetry"] = float(getattr(self.alg_dog, "last_symmetry_loss", 0.0))
             if arm_loss_tuple is not None:
                 loss_dict.update(self._make_loss_dict("arm", arm_loss_tuple))
+                loss_dict["arm/symmetry"] = float(getattr(self.alg_arm, "last_symmetry_loss", 0.0))
             else:
                 loss_dict.update(self._make_zero_loss_dict("arm"))
+                loss_dict["arm/symmetry"] = 0.0
             action_std = (
                 torch.cat((self.dog_model.std.detach(), self.arm_model.std.detach()))
                 if self._command_term().switch_open

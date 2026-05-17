@@ -80,6 +80,12 @@ parser.add_argument(
     default=False,
     help="Enable the RoboDuet stage1 omni reward aggregation mode during training.",
 )
+parser.add_argument(
+    "--symmetry",
+    action="store_true",
+    default=False,
+    help="Enable RoboDuet Go2Arm mirror data augmentation and mirror consistency loss during training.",
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -601,6 +607,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError("--roboduet_probe_dog_checkpoint cannot be combined with --resume or Distillation.")
         if agent_cfg.class_name != roboduet_runner_class_name:
             raise ValueError("--roboduet_probe_dog_checkpoint is only valid for RoboDuetAutomaticRunner.")
+    if args_cli.symmetry:
+        if agent_cfg.class_name != roboduet_runner_class_name:
+            raise ValueError("--symmetry is currently implemented only for RoboDuetAutomaticRunner.")
+        if not hasattr(agent_cfg, "symmetry"):
+            raise ValueError("--symmetry requires a RoboDuet runner config with symmetry fields.")
+        agent_cfg.symmetry = True
+        if hasattr(agent_cfg, "symmetry_loss_coef"):
+            agent_cfg.algorithm.symmetry_loss_coef = float(agent_cfg.symmetry_loss_coef)
+        print(
+            "[INFO] RoboDuet symmetry enabled: "
+            "using mirrored PPO minibatch augmentation and mirror consistency loss."
+        )
     if int(agent_cfg.seed) == -1:
         agent_cfg.seed = int(torch.randint(0, 10000, (1,)).item())
         print(f"[INFO] RoboDuet random seed selected: {agent_cfg.seed}")

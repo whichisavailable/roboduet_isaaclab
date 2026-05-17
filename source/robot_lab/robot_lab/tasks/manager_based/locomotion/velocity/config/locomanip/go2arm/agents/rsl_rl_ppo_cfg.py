@@ -65,6 +65,9 @@ class RoboDuetAutomaticPpoAlgorithmCfg:
     desired_kl: float = 0.01
     max_grad_norm: float = 1.0
     selective_adaptation_module_loss: bool = False
+    symmetry_callable: str | None = None
+    symmetry_mirror_callable: str | None = None
+    symmetry_loss_coef: float = 1.0
     rnd_cfg = None
 
 
@@ -95,6 +98,8 @@ class UnitreeGo2ArmTeacherRoughPPORunnerCfg(RslRlBaseRunnerCfg):
     roboduet_stage_switch_iteration: int | None = None
     roboduet_disable_two_stage: bool = False
     roboduet_export_deploy_models: bool = True
+    symmetry: bool = False
+    symmetry_loss_coef: float = 1.0
     resume: bool = False
     load_run: str = ".*"
     load_checkpoint: str = "model_.*.pt"
