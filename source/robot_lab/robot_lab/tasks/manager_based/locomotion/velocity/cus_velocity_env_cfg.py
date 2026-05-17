@@ -107,6 +107,40 @@ GO2ARM_UPSTREAM_COLLISION_BODY_REGEX = [
     r".*calf.*",
     r"^link[1-6]$",
 ]
+# Explicit non-foot body set for the merged `go2_piper_description_mjc_NoGripper`
+# articulation used by this Isaac Lab port.
+# With `merge_fixed_joints=True`, fixed-joint children such as `arm_mount`,
+# `base_link`, `Head_*`, `*_rotor`, `*_calflower*`, `imu`, and `radar` fold into
+# their nearest articulated parent body. The runtime rigid-body layout is thus:
+# - dog base: `base`
+# - dog legs: `*_hip`, `*_thigh`, `*_calf`
+# - arm: `link1`..`link6`
+# - support feet kept explicit via `dont_collapse`: `FL_foot`, `FR_foot`,
+#   `RL_foot`, `RR_foot`
+# Use an explicit allow-list here instead of a negative-lookahead regex so
+# reward/termination body selection cannot silently drift when regex matching
+# semantics or asset names change.
+GO2ARM_NON_FOOT_BODY_NAMES = [
+    GO2ARM_BASE_BODY_NAME,
+    "FL_hip",
+    "FL_thigh",
+    "FL_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
+    "RL_hip",
+    "RL_thigh",
+    "RL_calf",
+    "RR_hip",
+    "RR_thigh",
+    "RR_calf",
+    "link1",
+    "link2",
+    "link3",
+    "link4",
+    "link5",
+    "link6",
+]
 # Global contact covers feet plus selected illegal-contact bodies; dedicated foot sensors still define legal support.
 GO2ARM_NON_FOOT_BODY_REGEX = [r"^(?!.*(?:FL_foot|FR_foot|RL_foot|RR_foot)$).+"]
 # 预设 trot 步态偏置。
@@ -893,7 +927,7 @@ class RewardsCfg:
             "mani_regularization_support_non_foot_contact_threshold": 1.0,
             # 非足端接触检测所用传感器；这里要和当前合法支撑端定义保持一致，排除四个 foot。
             "mani_regularization_support_non_foot_contact_sensor_cfg": SceneEntityCfg(
-                "contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX
+                "contact_forces", body_names=GO2ARM_NON_FOOT_BODY_NAMES
             ),
             # 非足端接触里“发生了几个 body 接触”的计数项权重。
             "mani_regularization_support_non_foot_contact_count_weight": 1.0,
@@ -1078,7 +1112,7 @@ class RewardsCfg:
             # 碰撞噪声过滤阈值。
             "basic_collision_threshold": 1.0,
             # 碰撞检测传感器；这里同样排除当前被视为合法支撑端的四个 calf。
-            "basic_collision_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
+            "basic_collision_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_NAMES),
             # 碰撞计数项权重。
             "basic_collision_count_weight": 1.0,
             # 碰撞超阈值作用力项权重。
@@ -1142,7 +1176,7 @@ class TerminationsCfg:
         func=mdp.contact_termination,
         params={
             # 终止条件里的非法接触过滤也必须和 reward 的合法支撑端定义保持一致。
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_REGEX),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_NAMES),
             "soft_force_threshold": 1.0,
             "hard_force_threshold": 5.0,
             "consecutive_steps": 3,

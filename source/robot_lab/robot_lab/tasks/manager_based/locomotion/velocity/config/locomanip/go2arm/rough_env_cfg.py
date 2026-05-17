@@ -20,8 +20,7 @@ from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg impo
     GO2ARM_FOOT_BODY_NAMES,
     GO2ARM_FOOT_SCANNER_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
-    GO2ARM_NON_FOOT_BODY_REGEX,
-    GO2ARM_UPSTREAM_COLLISION_BODY_REGEX,
+    GO2ARM_NON_FOOT_BODY_NAMES,
     Go2ArmDefaultDeltaJointPositionActionCfg,
     LocomotionVelocityRoughEnvCfg,
 )
@@ -120,9 +119,9 @@ PRETRAINED_REWARD_SCALES = {
     "orientation_control": -5.0,
     "loco_energy": -5e-6,
     "feet_slip": -0.04,
-    "feet_clearance_cmd_linear": -40.0,
-    "tracking_contacts_shaped_force": 4.0,
-    "tracking_contacts_shaped_vel": 4.0,
+    "feet_clearance_cmd_linear": -50.0,
+    "tracking_contacts_shaped_force": 5.0,
+    "tracking_contacts_shaped_vel": 5.0,
     "collision": -10.0,
     "dof_vel": -1.0e-4,
     "dof_acc": -2.5e-7,
@@ -161,7 +160,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     rsl_rl_init_noise_std: float = 1.0
     reward_log_interval_iterations: int = 1
     reward_log_steps_per_iteration: int = 24
-    roboduet_stage1_omni_reward: bool = False
     enable_play_termination_reason_logging: bool = False
     roboduet_randomize_gravity: bool = False
     roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)
@@ -191,7 +189,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.scene.num_envs = 2048
+        self.scene.num_envs = 4096
         self.sim.gravity = (0.0, 0.0, -9.81)
         self.scene.robot = UNITREE_Go2Arm_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.merge_fixed_joints = True
@@ -271,6 +269,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             num_bins_vel_yaw=21,
             num_bins_body_pitch=1,
             num_bins_body_roll=1,
+            gait_kappa=0.04,
             pretrained_reward_scales={
                 key: PRETRAINED_REWARD_SCALES[key]
                 for key in ("tracking_lin_vel", "tracking_ang_vel", "tracking_contacts_shaped_force", "tracking_contacts_shaped_vel")
@@ -281,7 +280,6 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "command_name": "roboduet",
             "pretrained_scales": PRETRAINED_REWARD_SCALES,
             "hybrid_scales": HYBRID_REWARD_SCALES,
-            "roboduet_stage1_omni_reward": self.roboduet_stage1_omni_reward,
             "only_positive_rewards": False,
             "only_positive_rewards_ji22_style": True,
             "sigma_rew_neg": 0.05,
@@ -289,9 +287,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "tracking_sigma_yaw": 0.25,
             "gait_force_sigma": 100.0,
             "gait_vel_sigma": 10.0,
-            "illegal_contact_sensor_cfg": SceneEntityCfg(
-                "contact_forces", body_names=GO2ARM_UPSTREAM_COLLISION_BODY_REGEX
-            ),
+            "illegal_contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_NON_FOOT_BODY_NAMES),
             "foot_sensor_cfg": SceneEntityCfg("contact_forces", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "foot_asset_cfg": SceneEntityCfg("robot", body_names=GO2ARM_FOOT_BODY_NAMES, preserve_order=True),
             "leg_joint_cfg": SceneEntityCfg("robot", joint_names=GO2ARM_LEG_JOINT_NAMES, preserve_order=True),
