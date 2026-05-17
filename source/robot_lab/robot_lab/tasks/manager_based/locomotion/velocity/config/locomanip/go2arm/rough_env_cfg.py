@@ -161,6 +161,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
     reward_log_interval_iterations: int = 1
     reward_log_steps_per_iteration: int = 24
     enable_play_termination_reason_logging: bool = False
+    roboduet_stage1_omni_reward: bool = False
     roboduet_randomize_gravity: bool = False
     roboduet_gravity_range: tuple[float, float] = (-1.0, 1.0)
     roboduet_gravity_interval_s: float = 8.0
@@ -280,6 +281,7 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             "command_name": "roboduet",
             "pretrained_scales": PRETRAINED_REWARD_SCALES,
             "hybrid_scales": HYBRID_REWARD_SCALES,
+            "roboduet_stage1_omni_reward": self.roboduet_stage1_omni_reward,
             "only_positive_rewards": False,
             "only_positive_rewards_ji22_style": True,
             "sigma_rew_neg": 0.05,
