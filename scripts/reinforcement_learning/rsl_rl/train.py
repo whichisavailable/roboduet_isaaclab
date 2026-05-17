@@ -613,11 +613,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not hasattr(agent_cfg, "symmetry"):
             raise ValueError("--symmetry requires a RoboDuet runner config with symmetry fields.")
         agent_cfg.symmetry = True
+        symmetry_loss_coef = float(getattr(env_cfg, "roboduet_symmetry_loss_coef", getattr(agent_cfg, "symmetry_loss_coef", 1.0)))
         if hasattr(agent_cfg, "symmetry_loss_coef"):
-            agent_cfg.algorithm.symmetry_loss_coef = float(agent_cfg.symmetry_loss_coef)
+            agent_cfg.symmetry_loss_coef = symmetry_loss_coef
+        if hasattr(agent_cfg, "symmetry_loss_coef"):
+            agent_cfg.algorithm.symmetry_loss_coef = symmetry_loss_coef
         print(
             "[INFO] RoboDuet symmetry enabled: "
-            "using mirrored PPO minibatch augmentation and mirror consistency loss."
+            f"using mirrored PPO minibatch augmentation and mirror consistency loss (coef={symmetry_loss_coef:g})."
         )
     if int(agent_cfg.seed) == -1:
         agent_cfg.seed = int(torch.randint(0, 10000, (1,)).item())
