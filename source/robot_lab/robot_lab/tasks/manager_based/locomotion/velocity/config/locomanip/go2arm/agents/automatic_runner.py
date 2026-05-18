@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import time
 import statistics
 from collections import deque
@@ -337,6 +338,28 @@ class RoboDuetAutomaticRunner:
         missing = list(getattr(load_result, "missing_keys", []) or [])
         unexpected = list(getattr(load_result, "unexpected_keys", []) or [])
         return len(missing), len(unexpected)
+
+    @staticmethod
+    def _infer_iteration_from_checkpoint_path(path: str) -> int | None:
+        checkpoint_name = os.path.basename(path)
+        for pattern in (r"ac_weights_(\d+)\.pt$", r"model_(\d+)\.pt$"):
+            match = re.match(pattern, checkpoint_name)
+            if match is not None:
+                return int(match.group(1))
+        if checkpoint_name in {"ac_weights_last_dog.pt", "ac_weights_last_arm.pt"}:
+            checkpoint_dir = os.path.dirname(path)
+            try:
+                checkpoint_names = os.listdir(checkpoint_dir)
+            except OSError:
+                return None
+            numeric_iterations = []
+            for sibling_name in checkpoint_names:
+                match = re.match(r"ac_weights_(\d+)\.pt$", sibling_name)
+                if match is not None:
+                    numeric_iterations.append(int(match.group(1)))
+            if numeric_iterations:
+                return max(numeric_iterations)
+        return None
 
     @staticmethod
     def _derive_companion_arm_checkpoint_path(dog_checkpoint_path: str) -> str | None:
@@ -720,7 +743,8 @@ class RoboDuetAutomaticRunner:
                 f"arm_precheck=({arm_pre_missing},{arm_pre_unexpected},{arm_pre_shape}) "
                 f"arm_load=({arm_missing},{arm_unexpected})"
             )
-            self.current_learning_iteration = int(loaded_dict.get("iter", 0))
+            inferred_iteration = self._infer_iteration_from_checkpoint_path(path)
+            self.current_learning_iteration = int(loaded_dict.get("iter", inferred_iteration or 0))
             self.inference_policy.reset()
             self._last_load_debug = {
                 "path": path,
@@ -746,6 +770,9 @@ class RoboDuetAutomaticRunner:
             f"dog_load=({dog_missing},{dog_unexpected})"
         )
         arm_checkpoint_path = self._load_companion_arm_checkpoint(path, strict=strict, map_location=map_location)
+        inferred_iteration = self._infer_iteration_from_checkpoint_path(path)
+        if inferred_iteration is not None:
+            self.current_learning_iteration = int(inferred_iteration)
         self.inference_policy.reset()
         self._last_load_debug = {
             "path": path,

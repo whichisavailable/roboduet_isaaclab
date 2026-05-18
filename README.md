@@ -81,6 +81,22 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
 - `deploy_model/body_latest_arm.jit`
 - `deploy_model/history_latest_arm.jit`
 
+Resume training with RoboDuet dog checkpoints:
+
+```bash
+python scripts/reinforcement_learning/rsl_rl/train.py \
+  --task RobotLab-Isaac-Flat-Go2Arm-v0 \
+  --headless \
+  --resume \
+  --load_run <run-folder> \
+  --checkpoint checkpoints_dog/ac_weights_004000.pt \
+  --max_iterations 12000
+```
+
+- For RoboDuet, `--resume` now resolves checkpoints from `checkpoints_dog/` by default, and also accepts a direct dog checkpoint path.
+- Resuming from `ac_weights_004000.pt` restores the training iteration to `4000`, so stage2 still opens automatically at `10000`.
+- `--max_iterations` is the number of additional iterations to run. To continue from `4000` to `16000` total, use `--max_iterations 12000`.
+
 
 ### Play
 

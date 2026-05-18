@@ -286,6 +286,34 @@ def _resolve_roboduet_checkpoint_path(path: str) -> str:
     return retrieve_file_path(path)
 
 
+def _resolve_resume_checkpoint_path(log_root_path: str, agent_cfg, roboduet_runner_class_name: str) -> str:
+    """Resolve `--resume` checkpoint paths for both generic RSL-RL and RoboDuet layouts."""
+    load_checkpoint = getattr(agent_cfg, "load_checkpoint", None)
+    if isinstance(load_checkpoint, str):
+        expanded_path = os.path.abspath(os.path.expanduser(load_checkpoint))
+        has_path_separator = os.path.sep in load_checkpoint or (os.path.altsep and os.path.altsep in load_checkpoint)
+        if os.path.isfile(expanded_path) or has_path_separator:
+            return _resolve_roboduet_checkpoint_path(load_checkpoint)
+
+    if getattr(agent_cfg, "class_name", None) == roboduet_runner_class_name:
+        roboduet_checkpoint_pattern = load_checkpoint
+        if roboduet_checkpoint_pattern is None or str(roboduet_checkpoint_pattern).startswith("model_"):
+            roboduet_checkpoint_pattern = "ac_weights_last_dog.pt"
+        resume_path = get_checkpoint_path(
+            log_root_path,
+            agent_cfg.load_run,
+            roboduet_checkpoint_pattern,
+            other_dirs=["checkpoints_dog"],
+        )
+        print(
+            "[INFO] RoboDuet resume checkpoint override: using dog checkpoint under "
+            f"checkpoints_dog/ matching {roboduet_checkpoint_pattern!r}."
+        )
+        return resume_path
+
+    return get_checkpoint_path(log_root_path, agent_cfg.load_run, load_checkpoint)
+
+
 def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
     """Sync RSL-RL resume iteration into env counters used by Go2Arm curriculum/action masking."""
     raw_env = getattr(env, "unwrapped", env)
@@ -741,7 +769,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        resume_path = _resolve_resume_checkpoint_path(log_root_path, agent_cfg, roboduet_runner_class_name)
 
     # wrap for video recording
     if args_cli.video:
