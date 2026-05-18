@@ -2965,6 +2965,7 @@ def _compute_roboduet_reward_state(
     pretrained_scales: dict[str, float],
     hybrid_scales: dict[str, float],
     roboduet_stage1_omni_reward: bool,
+    roboduet_stage2_omni_reward: bool,
     only_positive_rewards: bool,
     only_positive_rewards_ji22_style: bool,
     sigma_rew_neg: float,
@@ -3024,6 +3025,7 @@ def _compute_roboduet_reward_state(
     reward_pos_arm_scaled = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
     reward_neg_arm_scaled = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
     reward_pos_dog_omni_scaled = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
+    reward_pos_arm_omni_scaled = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
     zero_reward = torch.zeros(env.num_envs, device=env.device, dtype=reward_dtype)
 
     foot_body_positions_w = None
@@ -3161,6 +3163,8 @@ def _compute_roboduet_reward_state(
         orientation_guide[up_flag] = torch.square(base_pitch + 0.3)[up_flag]
         metrics["orientation_heuristic"] = orientation_guide
 
+    arm_manip_tracking_pos_reward = zero_reward
+    arm_manip_tracking_ori_reward = zero_reward
     if has_active("arm_manip_commands_tracking_combine", "vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"):
         current_lpy = roboduet_current_lpy(env, ee_body_cfg)
         current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
@@ -3199,6 +3203,8 @@ def _compute_roboduet_reward_state(
                 _manip_weight_rpy = (manip_weight_lpy_start + manip_weight_rpy_start) - _manip_weight_lpy
             else:
                 _manip_weight_rpy = manip_weight_rpy_start + (manip_weight_rpy_end - manip_weight_rpy_start) * _alpha
+            arm_manip_tracking_pos_reward = torch.exp(-(_manip_weight_lpy * lpy_error))
+            arm_manip_tracking_ori_reward = torch.exp(-(_manip_weight_rpy * rpy_error))
             metrics["arm_manip_commands_tracking_combine"] = torch.exp(
                 -(_manip_weight_lpy * lpy_error + _manip_weight_rpy * rpy_error)
             )
@@ -3472,6 +3478,28 @@ def _compute_roboduet_reward_state(
             reward_neg_dog_scaled / float(sigma_rew_neg)
         )
         reward_arm_scaled = reward_pos_arm_scaled * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
+    elif only_positive_rewards_ji22_style and roboduet_stage2_omni_reward and term.switch_open:
+        tracking_lin_vel_weight = float(hybrid_scales.get("tracking_lin_vel", 0.0))
+        tracking_ang_vel_weight = float(hybrid_scales.get("tracking_ang_vel", 0.0))
+        arm_manip_weight = float(hybrid_scales.get("arm_manip_commands_tracking_combine", 0.0))
+        tracking_lin_vel_reward = metrics.get("tracking_lin_vel", zero_reward)
+        tracking_ang_vel_reward = metrics.get("tracking_ang_vel", zero_reward)
+        arm_manip_tracking_reward = (
+            enhance_exponential_tracking_reward(arm_manip_tracking_pos_reward)
+            + arm_manip_tracking_pos_reward * enhance_exponential_tracking_reward(arm_manip_tracking_ori_reward)
+        )
+        reward_pos_dog_omni_scaled = (
+            enhance_exponential_tracking_reward(tracking_lin_vel_reward) * tracking_lin_vel_weight
+            + enhance_exponential_tracking_reward(tracking_ang_vel_reward) * tracking_ang_vel_weight
+            + arm_manip_tracking_reward * arm_manip_weight
+        ) * reward_dt
+        reward_pos_arm_omni_scaled = arm_manip_tracking_reward * arm_manip_weight * reward_dt
+        reward_dog_scaled = 0.3 * (reward_dt + reward_pos_dog_omni_scaled) * torch.exp(
+            reward_neg_dog_scaled / float(sigma_rew_neg)
+        )
+        reward_arm_scaled = 0.3 * (reward_dt + reward_pos_arm_omni_scaled) * torch.exp(
+            reward_neg_arm_scaled / float(sigma_rew_neg)
+        )
     elif only_positive_rewards_ji22_style:
         reward_dog_scaled = reward_pos_dog_scaled * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))
         reward_arm_scaled = reward_pos_arm_scaled * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
@@ -3501,6 +3529,7 @@ def _compute_roboduet_reward_state(
         "reward_dog_scaled": reward_dog_scaled,
         "reward_arm_scaled": reward_arm_scaled,
         "reward_pos_dog_omni_scaled": reward_pos_dog_omni_scaled,
+        "reward_pos_arm_omni_scaled": reward_pos_arm_omni_scaled,
         "total_adjustment": reward_dog_for_manager - reward_dog_linear,
     }
     env._roboduet_reward_step_cache = {"key": cache_key, "value": reward_state}
@@ -3514,6 +3543,7 @@ def roboduet_weighted_reward_term(
     pretrained_scales: dict[str, float],
     hybrid_scales: dict[str, float],
     roboduet_stage1_omni_reward: bool,
+    roboduet_stage2_omni_reward: bool,
     only_positive_rewards: bool,
     only_positive_rewards_ji22_style: bool,
     sigma_rew_neg: float,
@@ -3541,6 +3571,7 @@ def roboduet_weighted_reward_term(
         pretrained_scales=pretrained_scales,
         hybrid_scales=hybrid_scales,
         roboduet_stage1_omni_reward=roboduet_stage1_omni_reward,
+        roboduet_stage2_omni_reward=roboduet_stage2_omni_reward,
         only_positive_rewards=only_positive_rewards,
         only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
         sigma_rew_neg=sigma_rew_neg,
@@ -3574,6 +3605,7 @@ def roboduet_total_reward_adjustment(
     pretrained_scales: dict[str, float],
     hybrid_scales: dict[str, float],
     roboduet_stage1_omni_reward: bool,
+    roboduet_stage2_omni_reward: bool,
     only_positive_rewards: bool,
     only_positive_rewards_ji22_style: bool,
     sigma_rew_neg: float,
@@ -3601,6 +3633,7 @@ def roboduet_total_reward_adjustment(
         pretrained_scales=pretrained_scales,
         hybrid_scales=hybrid_scales,
         roboduet_stage1_omni_reward=roboduet_stage1_omni_reward,
+        roboduet_stage2_omni_reward=roboduet_stage2_omni_reward,
         only_positive_rewards=only_positive_rewards,
         only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
         sigma_rew_neg=sigma_rew_neg,
@@ -3633,6 +3666,7 @@ class RoboDuetReward(ManagerTermBase):
         pretrained_scales: dict[str, float],
         hybrid_scales: dict[str, float],
         roboduet_stage1_omni_reward: bool,
+        roboduet_stage2_omni_reward: bool,
         only_positive_rewards: bool,
         only_positive_rewards_ji22_style: bool,
         sigma_rew_neg: float,
@@ -3660,6 +3694,7 @@ class RoboDuetReward(ManagerTermBase):
             pretrained_scales=pretrained_scales,
             hybrid_scales=hybrid_scales,
             roboduet_stage1_omni_reward=roboduet_stage1_omni_reward,
+            roboduet_stage2_omni_reward=roboduet_stage2_omni_reward,
             only_positive_rewards=only_positive_rewards,
             only_positive_rewards_ji22_style=only_positive_rewards_ji22_style,
             sigma_rew_neg=sigma_rew_neg,

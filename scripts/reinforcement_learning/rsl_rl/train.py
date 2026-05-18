@@ -78,7 +78,19 @@ parser.add_argument(
     "--omni",
     action="store_true",
     default=False,
+    help="Legacy alias that enables both RoboDuet stage1 and stage2 omni reward aggregation modes.",
+)
+parser.add_argument(
+    "--omni1",
+    action="store_true",
+    default=False,
     help="Enable the RoboDuet stage1 omni reward aggregation mode during training.",
+)
+parser.add_argument(
+    "--omni2",
+    action="store_true",
+    default=False,
+    help="Enable the RoboDuet stage2 omni reward aggregation mode during training.",
 )
 parser.add_argument(
     "--symmetry",
@@ -656,16 +668,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.roboduet_urdf:
         apply_roboduet_go2piper_overrides(env_cfg)
         print("[INFO] RoboDuet URDF override enabled: using upstream auto_train robot=go2 go2piper URDF.")
+    omni_stage1_enabled = bool(args_cli.omni or args_cli.omni1)
+    omni_stage2_enabled = bool(args_cli.omni or args_cli.omni2)
     if hasattr(env_cfg, "roboduet_stage1_omni_reward"):
-        env_cfg.roboduet_stage1_omni_reward = bool(args_cli.omni)
+        env_cfg.roboduet_stage1_omni_reward = omni_stage1_enabled
+    if hasattr(env_cfg, "roboduet_stage2_omni_reward"):
+        env_cfg.roboduet_stage2_omni_reward = omni_stage2_enabled
+    if hasattr(env_cfg, "roboduet_stage1_omni_reward") or hasattr(env_cfg, "roboduet_stage2_omni_reward"):
         rewards_cfg = getattr(env_cfg, "rewards", None)
         if rewards_cfg is not None:
             for term_cfg in vars(rewards_cfg).values():
                 params = getattr(term_cfg, "params", None)
-                if isinstance(params, dict) and "roboduet_stage1_omni_reward" in params:
-                    params["roboduet_stage1_omni_reward"] = env_cfg.roboduet_stage1_omni_reward
-        if args_cli.omni:
-            print("[INFO] RoboDuet omni reward enabled: using stage1 omni total reward aggregation.")
+                if not isinstance(params, dict):
+                    continue
+                if "roboduet_stage1_omni_reward" in params:
+                    params["roboduet_stage1_omni_reward"] = omni_stage1_enabled
+                if "roboduet_stage2_omni_reward" in params:
+                    params["roboduet_stage2_omni_reward"] = omni_stage2_enabled
+        if omni_stage1_enabled or omni_stage2_enabled:
+            print(
+                "[INFO] RoboDuet omni reward enabled: "
+                f"stage1={'on' if omni_stage1_enabled else 'off'}, "
+                f"stage2={'on' if omni_stage2_enabled else 'off'}."
+            )
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
