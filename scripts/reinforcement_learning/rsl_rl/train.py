@@ -314,6 +314,42 @@ def _resolve_resume_checkpoint_path(log_root_path: str, agent_cfg, roboduet_runn
     return get_checkpoint_path(log_root_path, agent_cfg.load_run, load_checkpoint)
 
 
+def _unlock_roboduet_command_curriculum(env) -> None:
+    """Treat the RoboDuet locomotion command curriculum as fully solved."""
+    raw_env = getattr(env, "unwrapped", env)
+    if not hasattr(raw_env, "command_manager"):
+        return
+
+    try:
+        command_term = raw_env.command_manager.get_term("roboduet")
+    except KeyError:
+        return
+
+    curriculum = getattr(command_term, "_curriculum", None)
+    weights = getattr(curriculum, "weights", None)
+    if weights is None:
+        return
+
+    weights[...] = 1.0
+    env_command_bins = getattr(command_term, "env_command_bins", None)
+    if env_command_bins is not None:
+        env_command_bins[...] = 0
+
+    resample_fn = getattr(command_term, "_resample_locomotion_commands", None)
+    refresh_fn = getattr(command_term, "_refresh_command_buffer", None)
+    if callable(resample_fn):
+        env_ids = torch.arange(command_term.num_envs, device=command_term.device)
+        resample_fn(env_ids, allow_curriculum_update=False)
+        if callable(refresh_fn):
+            refresh_fn()
+
+    active_bins = int((weights > 0.0).sum())
+    print(
+        "[INFO] RoboDuet resume command curriculum unlocked: "
+        f"active_bins={active_bins}/{len(weights)}, weight_min={float(weights.min()):g}, weight_max={float(weights.max()):g}."
+    )
+
+
 def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
     """Sync RSL-RL resume iteration into env counters used by Go2Arm curriculum/action masking."""
     raw_env = getattr(env, "unwrapped", env)
@@ -353,6 +389,7 @@ def _sync_resume_iteration_to_env(runner, env, agent_cfg) -> None:
     # The wrapper reset recomputes curriculum terms before command/event reset, so commands and
     # reset ranges immediately match the resumed training stage instead of the fresh-env stage.
     env.reset()
+    _unlock_roboduet_command_curriculum(env)
     if hasattr(raw_env, "command_manager"):
         try:
             ee_pose_cfg = raw_env.command_manager.get_term("ee_pose").cfg
