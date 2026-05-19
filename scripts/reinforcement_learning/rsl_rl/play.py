@@ -73,7 +73,7 @@ parser.add_argument(
     "--go2arm_dog_cmd",
     type=float,
     nargs="+",
-    metavar=("CMD",),
+    metavar="CMD",
     default=None,
     help="Fixed RoboDuet dog command for Go2Arm play. Stage2 expects 3 values: vx vy wz. Stage1 expects 5 values: vx vy wz pitch roll.",
 )
