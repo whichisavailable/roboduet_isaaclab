@@ -875,7 +875,9 @@ class RoboDuetCommandCfg(CommandTermCfg):
     # fixed instead of using the training-time curriculum and random command resampling.
     fixed_play_dog_command: tuple[float, ...] | None = None
     fixed_play_arm_command: tuple[float, float, float] | None = None
+    fixed_play_arm_orientation_rpy_b: tuple[float, float, float] | None = None
     disable_play_resampling: bool = False
+    disable_play_arm_resampling: bool = False
  
     def __post_init__(self):
         self.class_type = RoboDuetCommand
@@ -1026,7 +1028,7 @@ class RoboDuetCommand(CommandTerm):
             )[0]
             if env_ids.numel() > 0:
                 self._resample_locomotion_commands(env_ids)
-        if self.switch_open:
+        if self.switch_open and not self.cfg.disable_play_arm_resampling:
             self.arm_time += self._env.step_dt
             env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
             if env_ids.numel() > 0:
@@ -1144,9 +1146,21 @@ class RoboDuetCommand(CommandTerm):
             return
         self._sample_arm_position_commands(env_ids)
         self.commands_arm_obs[env_ids, :3] = self.commands_arm[env_ids]
-        roll = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.roll_ee_range)
-        pitch = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.pitch_ee_range)
-        yaw = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.yaw_ee_range)
+        fixed_orientation_rpy = self.cfg.fixed_play_arm_orientation_rpy_b
+        if fixed_orientation_rpy is not None:
+            fixed_orientation_rpy_tensor = torch.tensor(fixed_orientation_rpy, device=self.device, dtype=torch.float32)
+            if fixed_orientation_rpy_tensor.numel() != 3:
+                raise ValueError(
+                    "fixed_play_arm_orientation_rpy_b expects 3 values, "
+                    f"got {fixed_orientation_rpy}."
+                )
+            roll = fixed_orientation_rpy_tensor[0].expand(env_ids.numel())
+            pitch = fixed_orientation_rpy_tensor[1].expand(env_ids.numel())
+            yaw = fixed_orientation_rpy_tensor[2].expand(env_ids.numel())
+        else:
+            roll = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.roll_ee_range)
+            pitch = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.pitch_ee_range)
+            yaw = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.yaw_ee_range)
         zero = torch.zeros_like(roll)
         q1 = quat_from_euler_xyz(zero, zero, yaw)
         q2 = quat_from_euler_xyz(zero, pitch, zero)
@@ -1155,7 +1169,10 @@ class RoboDuetCommand(CommandTerm):
         self.obj_quats[env_ids] = quats
         self.target_abg[env_ids] = _quat_to_abg(quats)
         self.commands_arm_obs[env_ids, 3:6] = self.target_abg[env_ids]
-        self.T_trajs[env_ids] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.traj_time_range)
+        if self.cfg.disable_play_arm_resampling:
+            self.T_trajs[env_ids] = torch.full((env_ids.numel(),), float("inf"), device=self.device)
+        else:
+            self.T_trajs[env_ids] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.traj_time_range)
         self.arm_time[env_ids] = 0.0
 
     def _gait_normal_cdf(self, value: torch.Tensor, inv_scale: float) -> torch.Tensor:

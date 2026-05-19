@@ -131,7 +131,7 @@ from isaaclab.envs import (
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -280,6 +280,46 @@ def _sample_go2arm_dog_command_once(roboduet_cfg, *, include_body: bool = False)
     return tuple(float((cmd_range[0] + cmd_range[1]) * 0.5) for cmd_range in ranges)
 
 
+def _sample_go2arm_arm_orientation_once(roboduet_cfg) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Sample one RoboDuet arm orientation command and return both RPY and ABG views."""
+    roll = float(
+        torch.empty((), dtype=torch.float32).uniform_(
+            float(roboduet_cfg.roll_ee_range[0]), float(roboduet_cfg.roll_ee_range[1])
+        ).item()
+    )
+    pitch = float(
+        torch.empty((), dtype=torch.float32).uniform_(
+            float(roboduet_cfg.pitch_ee_range[0]), float(roboduet_cfg.pitch_ee_range[1])
+        ).item()
+    )
+    yaw = float(
+        torch.empty((), dtype=torch.float32).uniform_(
+            float(roboduet_cfg.yaw_ee_range[0]), float(roboduet_cfg.yaw_ee_range[1])
+        ).item()
+    )
+    rpy = (roll, pitch, yaw)
+    roll_tensor = torch.tensor([roll], dtype=torch.float32)
+    pitch_tensor = torch.tensor([pitch], dtype=torch.float32)
+    yaw_tensor = torch.tensor([yaw], dtype=torch.float32)
+    zero = torch.zeros_like(roll_tensor)
+    q1 = quat_from_euler_xyz(zero, zero, yaw_tensor)
+    q2 = quat_from_euler_xyz(zero, pitch_tensor, zero)
+    q3 = quat_from_euler_xyz(roll_tensor, zero, zero)
+    quat = quat_mul(q1, quat_mul(q2, q3))
+    x_axis = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+    y_axis = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32)
+    z_axis = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+    roll_vec = quat_apply(quat, y_axis)
+    pitch_vec = quat_apply(quat, z_axis)
+    yaw_vec = quat_apply(quat, x_axis)
+    abg = (
+        float(torch.atan2(roll_vec[:, 2], roll_vec[:, 1]).item()),
+        float(torch.atan2(pitch_vec[:, 0], pitch_vec[:, 2]).item()),
+        float(torch.atan2(yaw_vec[:, 1], yaw_vec[:, 0]).item()),
+    )
+    return rpy, abg
+
+
 def _resolve_go2arm_fixed_dog_command(roboduet_cfg, *, stage1: bool) -> tuple[tuple[float, ...], str]:
     """Resolve and validate the fixed RoboDuet dog command for play."""
     if args_cli.go2arm_dog_cmd is None:
@@ -387,9 +427,14 @@ def _configure_go2arm_fixed_arm_play_command(env_cfg) -> bool:
             f"--go2arm_arm_cmd y={y_cmd} is outside RoboDuet y_range={tuple(float(v) for v in roboduet_cfg.y_range)}."
         )
     roboduet_cfg.fixed_play_arm_command = arm_cmd
+    roboduet_cfg.disable_play_arm_resampling = True
+    sampled_rpy, sampled_abg = _sample_go2arm_arm_orientation_once(roboduet_cfg)
+    roboduet_cfg.fixed_play_arm_orientation_rpy_b = sampled_rpy
     print(
         "[INFO] Go2Arm RoboDuet fixed arm play command: "
-        f"arm(l,p,y)={arm_cmd}; ee orientation command still samples internally."
+        f"arm(l,p,y)={arm_cmd}; fixed one sampled arm orientation "
+        f"rpy={tuple(round(v, 4) for v in sampled_rpy)} "
+        f"abg={tuple(round(v, 4) for v in sampled_abg)}."
     )
     return True
 
