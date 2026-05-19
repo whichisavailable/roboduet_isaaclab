@@ -79,6 +79,12 @@ parser.add_argument(
     help="Keep Go2Arm/RoboDuet play in stage1 dog-only mode. By default play opens stage2.",
 )
 parser.add_argument(
+    "--arm_fix",
+    action="store_true",
+    default=False,
+    help="When used with --stage1, hard-reset the arm to default posture every physics step like upstream keep_arm_fixed.",
+)
+parser.add_argument(
     "--go2arm_dog_cmd",
     type=float,
     nargs="+",
@@ -347,15 +353,14 @@ def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
     stage1_switch_iteration = int(_GO2ARM_PLAY_STAGE1_ONLY_SWITCH_ITERATION)
 
     # Keep play in stage1 for dog-only validation: arm command observations stay
-    # zero, the RoboDuet inference policy emits zero arm actions, and the action
-    # term keeps joint1-6 deltas fixed.  The custom runner can overwrite env_cfg
-    # from agent_cfg during construction, so set both configs here.
+    # zero and the RoboDuet inference policy emits zero arm actions.  Only enable
+    # the upstream-style hard arm reset when --arm_fix is requested explicitly.
     roboduet_cfg.switch_iteration = stage1_switch_iteration
     if hasattr(agent_cfg, "roboduet_disable_two_stage"):
         agent_cfg.roboduet_disable_two_stage = False
     if hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
         agent_cfg.roboduet_stage_switch_iteration = stage1_switch_iteration
-    env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = stage1_switch_iteration
+    env_cfg.actions.joint_pos.fixed_delta_action_until_iteration = stage1_switch_iteration if args_cli.arm_fix else 0
 
     # Only freeze the dog command after one initial sample/CLI command.
     roboduet_cfg.fixed_play_dog_command = dog_cmd
@@ -366,7 +371,8 @@ def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
     print(
         "[INFO] Go2Arm RoboDuet stage1 dog play command: "
         f"source={dog_cmd_source}, dog(vx,vy,wz,pitch,roll)={dog_cmd}, "
-        f"resampling_time_s={fixed_time_s:g}, switch_iteration={stage1_switch_iteration}."
+        f"resampling_time_s={fixed_time_s:g}, switch_iteration={stage1_switch_iteration}, "
+        f"arm_fix={'on' if args_cli.arm_fix else 'off'}."
     )
     return True
 
@@ -489,6 +495,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             fixed_roboduet_play = _configure_go2arm_stage2_play(env_cfg, agent_cfg)
             play_stage = "stage2 whole-body"
+            if args_cli.arm_fix:
+                print("[INFO] Go2Arm play override: ignoring --arm_fix because it only applies to --stage1.")
         fixed_arm_play = False
         if args_cli.go2arm_arm_cmd is not None:
             if args_cli.stage1:
