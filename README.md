@@ -1,43 +1,18 @@
 ## Overview
 
-**robot_lab_roboduet** 是一个基于 `robot_lab` 的本地 IsaacLab 移植版本，目标是尽可能严格地对齐 RoboDuet 原仓库的 `go2` 训练语义、网络结构、观测组织、命令逻辑、奖励形式和两阶段训练流程。
+**roboduet_isaaclab** 是一个基于 `roboduet` (Isaacgym)的IsaacLab版本，目标是严格对齐 RoboDuet 原仓库`go2`的网络结构、观测、命令、奖励、随机化、终止、课程和两阶段训练流程。
 
-当前这份仓库说明强调两点：
-
-1. **细节目标是对齐 RoboDuet 原仓库。**
-2. **当前真正完成并验证的是 flat 任务。**
-
-虽然代码里仍然保留了 `RobotLab-Isaac-Rough-Go2Arm-v0` 这个任务 ID，但当前 `rough_env_cfg.py` 里也把 terrain 强制设成了 `plane`。因此从有效训练语义上看，当前仓库仍然只有 **flat 版本** 是主线和对齐对象。
+虽然代码里仍然保留了 `RobotLab-Isaac-Rough-Go2Arm-v0` 这个任务注册点，但当前 `rough_env_cfg.py` 里也把 terrain 强制设成了 `plane`。从训练上看，当前仓库和roboduet中只有flat任务是一致的。
 
 ## Alignment Status
 
-当前对齐目标是 RoboDuet 原仓库的 `go2` 版本，尤其包括：
-
+主要对齐点：
 - 两阶段训练：`dog-only -> dog+arm`
-- 观测分组：`dog_policy` / `dog_privileged` / `arm_policy` / `arm_privileged`
+- 观测分组：`dog_policy`56D / `dog_privileged`2D / `arm_policy`20D / `arm_privileged`9D
 - 动作结构：`12` 维 dog 动作 + `6` 维 arm 动作 + `2` 维 plan action
-- 历史观测驱动的 adaptation policy
+- 历史观测的adaptation model
 - locomotion command curriculum
-- RoboDuet 风格 reward term、scale 和 stage switch 逻辑
-- 上游风格的 checkpoint 导出布局：`checkpoints_dog/`、`checkpoints_arm/`、`deploy_model/`
-
-代码中内置了一个显式检查入口：
-
-```bash
-python scripts/reinforcement_learning/rsl_rl/train.py \
-  --task RobotLab-Isaac-Flat-Go2Arm-v0 \
-  --roboduet_alignment_check \
-  --headless
-```
-
-这个检查会验证至少以下关键量：
-
-- `dog_policy = 56D`
-- `dog_privileged = 2D`
-- `arm_policy = 20D`
-- `arm_privileged = 9D`
-- 总动作维度 `18D`
-- `arm` 额外 planner 输出 `2D`
+- reward term、scale 和 stage switch 逻辑
 - `step_dt = 0.02`
 - `max_episode_length = 1000`
 - `num_steps_per_env = 24`
@@ -51,7 +26,7 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
 - 安装链路：`arm_mount -> link1 -> link2 -> link3 -> link4 -> link5 -> link6`
 - 末端执行器：`link6`
 
-默认训练使用本地 `Go2 + Piper` 资产链路；如果需要和上游 RoboDuet `auto_train` 的 `go2piper` 机器人描述做更直接的对比，可额外启用 `--roboduet_urdf`。
+默认训练使用本地 `Go2 + Piper` 资产链路
 
 ## Default Joint State
 
@@ -81,7 +56,7 @@ joint5 = 0.0
 joint6 = 0.0
 ```
 
-这组默认姿态同时也是 joint-delta action 的偏置中心。
+这组默认姿态同时也是 joint-delta action 的偏置中心。狗的默认姿态与上游对齐，但是机械臂由于型号不同，并不完全对齐。
 
 ## Local Version
 
@@ -105,35 +80,32 @@ python -m pip install -e source/robot_lab
 - `RobotLab-Isaac-Flat-Go2Arm-v0`
 - `RobotLab-Isaac-Rough-Go2Arm-v0`
 
-但需要明确：
+但需要注意：
 
-- **建议实际只使用 `RobotLab-Isaac-Flat-Go2Arm-v0`。**
+- **建议实际使用 `RobotLab-Isaac-Flat-Go2Arm-v0`。**
 - `rough` 入口当前不是一个真正独立的 rough-terrain RoboDuet 任务。
 - `rough_env_cfg.py` 当前同样将 terrain 强制成 `plane`，保留该 ID 主要是为了兼容本地代码路径和后续扩展。
 
 ## Training
 
-当前默认 runner 是本地 RoboDuet automatic runner，对齐上游 `auto_train` 的两阶段训练流程：
+当前默认 runner 是本地 RoboDuet automatic runner，对齐原仓库 `auto_train` 的两阶段训练流程：
 
 - stage 1：只训练 dog locomotion policy
 - stage 2：打开 arm policy 和 whole-body 协同控制
 
-默认切换规则：
+切换规则：
 
-- 从头训练：`10000` iterations 切 stage 2
-- 如果同时提供 dog/arm 预训练 checkpoint：`2000` iterations 切 stage 2
-- 如果显式禁用两阶段：切换点等价于 `0`
+- 从头训练或--resume：`10000` iterations 切 stage 2
+- 如果显式指定狗的权重`--roboduet_stage2_dog_checkpoint <path>`，可以直接从stage2开始训练
 
-推荐训练入口：
+训练入口：
 
 ```bash
 python scripts/reinforcement_learning/rsl_rl/train.py \
   --task RobotLab-Isaac-Flat-Go2Arm-v0 \
   --headless \
-  --num_envs 2048
+  --num_envs 4096
 ```
-
-默认配置里的环境数是 `4096`，文档里示例用 `2048` 是为了更保守地适配显存。
 
 ### Train Arguments
 
@@ -149,18 +121,13 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
 | `--resume` | 从已有 run 恢复训练 |
 | `--load_run <run-folder>` | 指定恢复的 run 目录 |
 | `--checkpoint <path-or-pattern>` | 恢复 checkpoint；RoboDuet runner 默认会优先从 `checkpoints_dog/` 解析 |
-| `--roboduet_alignment_check` | 仅检查 RoboDuet 关键语义是否对齐，然后退出 |
-| `--roboduet_debug_stage_switch_iteration` | 调试用，强行覆盖 stage switch iteration |
-| `--roboduet_probe_dog_checkpoint <path>` | 调试用，只把 dog checkpoint 直接载入 runner，不走标准 resume |
-| `--roboduet_stage2_dog_checkpoint <path>` | 直接从 dog checkpoint 引导进入 stage 2，runner iteration 会被同步到 `10000` |
-| `--roboduet_urdf` | 使用上游 RoboDuet `go2piper` 对齐的 URDF 和末端偏置 |
+| `--roboduet_stage2_dog_checkpoint <path>` | 直接从 dog checkpoint 引导进入 stage 2，runner iteration 会被同步到 `10000`，不能和--resume一起使用 |
 | `--symmetry` | 启用 RoboDuet Go2Arm 镜像增强和 mirror consistency loss |
-| `--omni` | 同时打开 stage1 和 stage2 的 omni reward 聚合模式 |
+| `--omni` | 同时打开 stage1 和 stage2 的 omni reward|
 | `--omni1` | 仅打开 stage1 omni reward |
 | `--omni2` | 仅打开 stage2 omni reward |
 | `--video` | 训练时录视频 |
 | `--video_interval` / `--video_length` | 控制训练视频录制频率和长度 |
-| `--low_vram_num_envs` | 低显存 GPU 时自动下调并行环境数；默认关闭，避免改变 RoboDuet 语义 |
 
 ### Resume Example
 
@@ -182,7 +149,7 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
 
 ### Training Outputs
 
-训练产物除了标准日志，还会额外导出与上游兼容的文件：
+训练产物除了标准日志，还会额外导出与原仓库兼容的文件：
 
 - `checkpoints_dog/ac_weights_*.pt`
 - `checkpoints_dog/ac_weights_last_dog.pt`
@@ -209,40 +176,38 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 - `play.py` 默认走确定性 `act_inference()`
 - 默认直接打开 stage 2 回放
 - 默认关闭 eval-time DR 和外部扰动，但保留 reset 随机化
-- 默认不再走通用导出逻辑，而是建议直接使用训练期间生成的 `deploy_model/`
 
 ### Play Arguments
 
 | 参数 | 作用 |
 | --- | --- |
-| `--checkpoint` | 指定回放 checkpoint。对 Go2Arm/RoboDuet，默认会优先从 `checkpoints_dog/` 找 `ac_weights_last_dog.pt` |
-| `--stage1` | 强制在 stage 1 dog-only 模式下回放 |
+| `--checkpoint` | 指定play checkpoint。默认会优先从 `checkpoints_dog/` 找 `ac_weights_last_dog.pt` |
+| `--stage1` | 强制在 stage 1 dog-only 模式下play |
 | `--arm_fix` | 仅与 `--stage1` 一起使用；每步把 arm 强制重置到默认姿态，模拟上游 `keep_arm_fixed` |
 | `--go2arm_dog_cmd ...` | 固定 dog command。stage1 需要 5 维：`vx vy wz pitch roll`；stage2 需要 3 维：`vx vy wz` |
 | `--go2arm_arm_cmd L P Y` | stage2 下固定 arm 的 `l/p/y` 位置命令 |
-| `--roboduet_urdf` | 回放时切到上游 `go2piper` URDF |
 | `--go2arm_trace_actions` | 定期打印 dog/arm 命令与实际执行状态 |
 | `--video` / `--video_length` | 回放并录制视频 |
 | `--real-time` | 实时速率回放 |
 
 说明：
 
-- stage1 回放时，arm command 观测保持为零，arm policy 也不会输出实际机械臂动作
+- stage1 回放时，arm command 保持为零，arm policy 也不会输出实际机械臂动作，狗的pitch和roll由命令显示指定（没给默认为0）
 - stage2 回放默认把 dog command 固定为 `(0, 0, 0)`，除非显式传入 `--go2arm_dog_cmd`
 - `--go2arm_arm_cmd` 只固定 arm 的位置命令，姿态命令仍会按 RoboDuet 范围采样一次并保持不变
 
 ## Task Design Details
 
-这一节尽量按代码实际实现写，而不是按概念性描述写。
+和roboduet仓库对齐，有些地方与原文有区别。
 
-### 1. Network Structure And Control Pipeline
+### 1. Network Structure
 
 当前 automatic runner 使用两套独立 PPO：
 
 - `dog_model`: 负责底盘 locomotion
 - `arm_model`: 负责机械臂 joint action 与 planner body command
 
-对齐检查中的核心常量：
+核心常量：
 
 - `dog_policy_obs_dim = 56`
 - `dog_privileged_obs_dim = 2`
@@ -259,12 +224,13 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 
 #### Dog Model
 
-- 历史输入长度：`56 * 30 = 1680`
+- 历史输入长度：`56 * 30 = 1680`，即30帧的历史观测
 - privileged 维度：`2`
 - adaptation module：`1680 -> 256 -> 128 -> 2`
 - actor MLP：`(1680 + 2) -> 512 -> 256 -> 128 -> 12`
 - critic MLP：`(1680 + 2) -> 512 -> 256 -> 128 -> 1`
 - 初始动作噪声标准差：`1.0`
+- **也就是说狗的网络输入是本体感知的30帧历史信息总共1680维，再加上用这1680维拟合的特权信息adaptation module输出2维**
 
 #### Arm Model
 
@@ -279,14 +245,13 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 - 输出 `8` 维：前 `6` 维是 arm joint action，后 `2` 维是 planner action
 - 最后 `2` 维 planner action 会过 `tanh`
 - 初始动作噪声标准差：`0.1`
+-**手的网络输入不把全部历史信息600维塞入，而是用600维做特权拟合9维+历史编码128维，再把这一帧观测20D+9D+128D作为输入**
 
 #### Stage Switch
 
 - stage1：只训练 `dog PPO`
-- stage1：`arm PPO` 不 rollout、不 update
-- stage1：环境执行的 arm action 恒为 `0`
-- stage1：action term 对 `joint1..joint6` 强制 `delta = 0`
-- stage2：dog/arm 两支同时工作
+- stage1：环境执行的 arm action 恒为 `0`，且会在每个仿真物理步把机械臂拉回默认位置，清空速度
+- stage2：dog/arm 同时工作
 
 #### Final Action Execution
 
@@ -294,13 +259,13 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 
 - 动作顺序固定为：`12` 个腿关节 + `6` 个 arm 关节
 - `action_scale = 0.25`
-- 四个 hip 关节额外乘 `0.5`
+- 四个 hip 关节额外乘 `0.5`，即最终scale=0.125
 - 最终目标形式为：`target_joint_pos = default_joint_pos + delta`
-- stage1 冻结的就是 `joint1..joint6`
+- stage1 冻结 `joint1..joint6`
 
 arm policy 的最后 `2` 维 planner 输出不会直接下发到执行器，而是先映射成 dog command 里的 body `pitch/roll`：
 
-- planner 输出先乘 `0.4`
+- planner 输出先乘 `0.4`，对应前面stage1的pitch/roll命令范围
 - 再按 `limit_body_pitch` / `limit_body_roll` 裁剪
 
 ### 2. Observations
@@ -319,6 +284,7 @@ arm policy 的最后 `2` 维 planner 输出不会直接下发到执行器，而�
 | `clock_inputs` | 4 | 四条腿的步态相位时钟 `sin` 编码 |
 
 总维度：`3 + 12 + 12 + 12 + 5 + 6 + 2 + 4 = 56`
+**注意是手动用scale对维度尺度调整，没有打开归一化**
 
 #### Dog Privileged Observation: 2D
 
@@ -349,9 +315,8 @@ arm policy 的最后 `2` 维 planner 输出不会直接下发到执行器，而�
 
 说明：
 
-- 所有观测组都关闭了 corruption
-- `actions` 读取的是 **effective action**，不是原始策略输出
-- 当前实现保留了 RoboDuet 的 history-based student / teacher 结构
+- 所有观测组都关闭了 corruption，即假设观测是准确的
+- `actions` 读取的是 effective action，不是原始策略输出
 
 ### 3. Commands
 
@@ -373,9 +338,9 @@ arm policy 的最后 `2` 维 planner 输出不会直接下发到执行器，而�
 
 训练配置中的有效范围：
 
-- `lin_vel_x = [-1.0, 1.0]`
+- `lin_vel_x = [-3.0, 3.0]`(原仓库`[-5,5]`)
 - `lin_vel_y = [-0.6, 0.6]`
-- `ang_vel_yaw = [-1.0, 1.0]`
+- `ang_vel_yaw = [-2.0, 2.0]`(原仓库`[-5,5]`)
 - `body_pitch_range = [-0.4, 0.4]`
 - `body_roll_range = [-0.4, 0.4]`
 
@@ -410,7 +375,7 @@ commands scale：
 arm command 在策略输入里是 6 维：
 
 - 前 `3` 维：位置命令 `l/p/y`
-- 后 `3` 维：姿态命令 `abg`
+- 后 `3` 维：姿态命令 `abg`(和论文中的6D不同)
 
 位置采样范围：
 
@@ -428,7 +393,7 @@ arm command 在策略输入里是 6 维：
 
 - `traj_time_range = [2.0s, 3.0s]`
 
-碰撞 / 无效目标过滤：
+碰撞 / 无效目标过滤（**原仓库中没有**）：
 
 - arm target 会在局部 `xyz` 空间里进行排除盒检测
 - `arm_collision_lower_limits = (-0.38, -0.16, -0.3)`
@@ -446,7 +411,7 @@ stage1 / stage2 的差别：
 
 - `gait_frequency = 3.0`
 - `gait_duration = 0.5`
-- `gait_kappa = 0.04`
+- `gait_kappa = 0.04`（原文0.07，类初始化时覆盖）
 
 输出包括：
 
@@ -456,15 +421,10 @@ stage1 / stage2 的差别：
 
 ### 4. Rewards
 
-这一节刻意拆成两部分：
+这一节分为两部分：
 
-1. **RoboDuet 原仓库对齐版本**
-2. **本地修改 / IsaacLab 实现补丁**
-
-这样阅读时可以分清：
-
-- 哪些是你要对齐的 reward 语义
-- 哪些是为了在本地 IsaacLab 上复现这套语义而做的实现层改写
+1. **RoboDuet 原仓库版本**
+2. **本地--omni形式奖励版本**
 
 #### 4.1 RoboDuet 原仓库对齐版本
 
