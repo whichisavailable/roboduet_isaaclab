@@ -1,25 +1,37 @@
 ## Overview
 
-**robot_lab** is a RL extension library for robots, based on IsaacLab. It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
+**robot_lab_roboduet** 是一个基于 `robot_lab` 的本地变体，用于在 IsaacLab 上复现并扩展 RoboDuet 风格的全身协同移动操作训练流程。
 
-## Roboduet Task
+当前仓库主要聚焦于：
 
-`Roboduet` 是一个四足机器人背载机械臂的 loco-manipulation 任务,当前工作主要复现文章 *RoboDuet: Learning a Cooperative Policy for  Whole-Body Legged Loco-Manipulation* (RAL)。
+- 将 RoboDuet 的训练范式迁移到本地 `Go2 + Piper` 资产链路
+- 保留上游 `auto_train` 的两阶段 `dog -> dog+arm` 训练语义
+- 与本地 `go2arm` 任务代码和 IsaacLab 工作流兼容
+- 提供平地基线任务与本地 rough terrain 扩展任务
 
+## RoboDuet Task
 
-### Robot Setup
+当前任务面向四足底盘搭载 6 自由度机械臂的协同 locomotion + manipulation，主要参考：
 
-- 机器人主体：Unitree Go2 四足机器人
-- 机械臂：Piper 6 自由度机械臂
-- 安装方式：机械臂通过背部固定安装位 `arm_mount` 装到 Go2 机体上，URDF 里的链路顺序是 `arm_mount -> link1 -> link2 -> link3 -> link4 -> link5 -> link6`
+*RoboDuet: Learning a Cooperative Policy for Whole-Body Legged Loco-Manipulation*.
+
+和原始上游实现相比，这个仓库不是逐行镜像，而是一个建立在 `robot_lab` 之上的本地 IsaacLab 移植版本。目标是尽可能保留有效训练行为，同时适配本地资产、环境和调试方式。
+
+## Robot Setup
+
+- 机器人主体：Unitree Go2
+- 机械臂：Piper 6-DoF
+- 安装链路：`arm_mount -> link1 -> link2 -> link3 -> link4 -> link5 -> link6`
 - 末端执行器：`link6`
 
-### Default Joint State
+默认训练路径使用本地 `go2arm` 的 URDF 资产链路。若需要直接对齐上游 RoboDuet `auto_train` 的机器人描述，可在训练和回放脚本中额外启用 `--roboduet_urdf`。
 
-当前任务使用的默认初始关节位来自本地 Go2Arm 资产配置，默认值如下：
+## Default Joint State
+
+当前任务使用的本地 Go2Arm 默认关节初始姿态如下：
 
 ```text
-四足关节
+Leg joints
 FL_hip_joint   = 0.0
 FL_thigh_joint = 0.8
 FL_calf_joint  = -1.5
@@ -33,7 +45,7 @@ RR_hip_joint   = 0.0
 RR_thigh_joint = 0.8
 RR_calf_joint  = -1.5
 
-机械臂关节
+Arm joints
 joint1 = 0.0
 joint2 = 0.314
 joint3 = -0.2967
@@ -42,18 +54,48 @@ joint5 = 0.0
 joint6 = 0.0
 ```
 
-其中，机械臂默认姿态会尽量避免把 `joint2` 和 `joint3` 放在单侧关节极限附近，以减少训练初期随机重置时被卡住的风险。
+这组默认姿态同时也是当前本地 joint-delta action 参数化的中心点。
 
-### Local Version
-
-本地使用的版本是：
+## Local Version
 
 - Isaac Sim 4.5
 - Isaac Lab 2.2.1
 
-### Training
+## Installation
 
-严格对齐上游 `scripts/auto_train.py` 的本地入口是平地任务：
+请在 IsaacLab 对应的 Python 环境中安装本扩展：
+
+```bash
+python -m pip install -e source/robot_lab
+```
+
+如果你本地同时以 editable 方式安装了 `IsaacLab` 或 `rsl_rl`，建议保持它们处于同一个 Python 环境，避免版本错配。
+
+## Registered Environments
+
+当前仓库注册了两个 Go2Arm loco-manipulation 环境：
+
+- `RobotLab-Isaac-Flat-Go2Arm-v0`
+- `RobotLab-Isaac-Rough-Go2Arm-v0`
+
+推荐使用顺序：
+
+- 先从 `RobotLab-Isaac-Flat-Go2Arm-v0` 开始，便于验证行为和调试训练流程
+- 平地版本稳定后，再切到 `RobotLab-Isaac-Rough-Go2Arm-v0`
+
+## Training
+
+默认 PPO runner 是本地 RoboDuet 风格的 automatic runner，保留了上游的两阶段训练结构：
+
+- stage 1：仅 dog 的 locomotion 阶段
+- stage 2：dog-arm 协同阶段
+
+默认情况下：
+
+- 从头训练时，两阶段切换点为 `10000` iterations
+- 当 runner config 同时提供 dog 和 arm 预训练权重时，默认切换点变为 `2000`
+
+平地训练示例：
 
 ```bash
 python scripts/reinforcement_learning/rsl_rl/train.py \
@@ -62,26 +104,27 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
   --num_envs 2048
 ```
 
-说明：
+rough 训练示例：
 
-- `RobotLab-Isaac-Flat-Go2Arm-v0` 对齐上游 `auto_train` 默认使用的 `plane` 地形。
-- `RobotLab-Isaac-Rough-Go2Arm-v0` 是本地扩展版本，不属于原始 `auto_train` 默认设置。
-- 默认两阶段切换迭代与上游一致：从头训练时为 `10000`，若同时提供 dog/arm 预训练权重则默认切到 `2000`。
-- 可在 `go2arm/agents/rsl_rl_ppo_cfg.py` 中通过以下字段覆盖：
-  `roboduet_pretrained_dog_checkpoint`、`roboduet_pretrained_arm_checkpoint`、
-  `roboduet_stage_switch_iteration`、`roboduet_disable_two_stage`。
+```bash
+python scripts/reinforcement_learning/rsl_rl/train.py \
+  --task RobotLab-Isaac-Rough-Go2Arm-v0 \
+  --headless \
+  --num_envs 2048
+```
 
-训练日志会额外导出与上游兼容的部署产物：
+常用参数：
 
-- `checkpoints_dog/ac_weights_*.pt`
-- `checkpoints_arm/ac_weights_*.pt`
-- `deploy_model/adaptation_module_latest_dog.jit`
-- `deploy_model/body_latest_dog.jit`
-- `deploy_model/adaptation_module_latest_arm.jit`
-- `deploy_model/body_latest_arm.jit`
-- `deploy_model/history_latest_arm.jit`
+- `--resume`：从已有 run 继续训练
+- `--load_run <run-folder>`：指定要恢复的 run
+- `--checkpoint <path-or-pattern>`：覆盖 checkpoint 选择逻辑
+- `--roboduet_stage2_dog_checkpoint <path>`：直接用 dog checkpoint 引导 stage 2
+- `--roboduet_alignment_check`：只创建环境并检查关键 RoboDuet 语义，不启动训练
+- `--roboduet_urdf`：切换到上游风格的 Go2Piper URDF 覆盖
+- `--symmetry`：启用镜像增强和 mirror consistency loss
+- `--omni` / `--omni_stage1` / `--omni_stage2`：启用 RoboDuet 风格的 omni reward 聚合
 
-Resume training with RoboDuet dog checkpoints:
+恢复训练示例：
 
 ```bash
 python scripts/reinforcement_learning/rsl_rl/train.py \
@@ -93,219 +136,87 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
   --max_iterations 12000
 ```
 
-- For RoboDuet, `--resume` now resolves checkpoints from `checkpoints_dog/` by default, and also accepts a direct dog checkpoint path.
-- Resuming from `ac_weights_004000.pt` restores the training iteration to `4000`, so stage2 still opens automatically at `10000`.
-- `--max_iterations` is the number of additional iterations to run. To continue from `4000` to `16000` total, use `--max_iterations 12000`.
+说明：
 
+- 对 RoboDuet automatic runner，`--resume` 默认会优先从 `checkpoints_dog/` 解析 dog checkpoint
+- 从 `ac_weights_004000.pt` 恢复时，训练迭代数会回到 `4000`
+- `--max_iterations` 表示恢复后还要继续跑多少 iteration
 
-### Play
+## Training Outputs
+
+除了标准日志目录外，RoboDuet 训练还会额外导出与上游兼容的产物：
+
+- `checkpoints_dog/ac_weights_*.pt`
+- `checkpoints_arm/ac_weights_*.pt`
+- `deploy_model/adaptation_module_latest_dog.jit`
+- `deploy_model/body_latest_dog.jit`
+- `deploy_model/adaptation_module_latest_arm.jit`
+- `deploy_model/body_latest_arm.jit`
+- `deploy_model/history_latest_arm.jit`
+
+这样更方便和上游 checkpoint 以及部署模块做对比。
+
+## Play
+
+基础回放命令：
 
 ```bash
 python scripts/reinforcement_learning/rsl_rl/play.py \
   --task RobotLab-Isaac-Flat-Go2Arm-v0 \
-  --checkpoint <path-to-model_xxx.pt>
+  --checkpoint <path-to-model-or-ac_weights.pt>
 ```
 
-说明：
+当前仓库中的回放行为：
 
-- `play.py` 对 RoboDuet 自动训练 runner 使用确定性 `act_inference()` 推理，而不是采样动作。
-- 播放时会自动关闭训练阶段的机械臂冻结掩码，便于直接观察真实机械臂输出。
-- 对 RoboDuet 自动训练策略，推荐直接使用训练阶段导出的 `deploy_model/` 产物；`play.py` 不再重复走通用导出流程。
+- `play.py` 对 RoboDuet automatic runner 使用确定性 `act_inference()`
+- 回放时默认关闭训练阶段的机械臂冻结逻辑，便于直接观察 arm 输出
+- 对 automatic runner 训练得到的策略，更推荐直接使用导出的 `deploy_model/` 产物进行部署
 
+常用回放参数：
 
+- `--roboduet_urdf`
+- `--go2arm_stage1_play`
+- `--go2arm_dog_cmd vx vy wz`
+- `--go2arm_arm_cmd l p y`
+- `--go2arm_ee_pos X Y Z`
+- `--go2arm_ee_rpy R P Y`
+- `--go2arm_trace_actions`
 
-### Note
+## Current Alignment Scope
 
-- 机器人资产仍保持 `Go2 + Piper` 的本地 URDF 导入链路，不回退到上游 `arx5go2.urdf`。
-- 当前迁移目标聚焦本地 `go2arm` 版本，不包含上游 `go1` 分支。
+当前仓库主要对齐的是 RoboDuet 在本地 IsaacLab 栈上的有效训练语义，重点包括：
 
+- 观测分组：`dog_policy`、`dog_privileged`、`arm_policy`、`arm_privileged`
+- 两阶段训练调度
+- `12` 维 dog action head 与 `6 + 2` 维 arm action head
+- 上游风格的 checkpoint 与 deploy 导出布局
+- 带阶段感知的 reward 聚合与 command 处理
 
-### Go2Arm Task Design Details
+当前有两点本地差异是有意保留的：
 
+- stage-1 的 arm freeze 是通过在 IsaacLab action 路径中强制 arm delta action 为零实现的
+- 足端接触处理比上游更严格，因为本地任务使用了更细的 foot contact sensing 来恢复合法支撑接触
 
+## Key Files
 
-#### 动作设计
+和 RoboDuet Go2Arm 任务最相关的文件包括：
 
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/rough_env_cfg.py`
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/flat_env_cfg.py`
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/agents/rsl_rl_ppo_cfg.py`
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/agents/automatic_runner.py`
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/commands.py`
+- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/rewards.py`
+- `scripts/reinforcement_learning/rsl_rl/train.py`
+- `scripts/reinforcement_learning/rsl_rl/play.py`
 
+## Notes
 
-#### 观测设计
-
-
-##### 本体观测（policy）
-
-
-##### 特权观测（privileged）
-
-
-
-#### 命令设计
-
-
-#### 奖励设计
-
-
-
-#### 课程设计
-
-
-
-#### Events 与随机化
-
-
-
-
-#### 接触建模与终止条件
-
-
-
-
-
-### RoboDuet Alignment Notes
-
-Checked against the local upstream clone at `_tmp_roboduet_upstream`.
-
-- Training-stage defaults are aligned with upstream `scripts/auto_train.py`: the two-stage switch is `10000` iterations from scratch and `2000` when both dog/arm pretrained checkpoints are provided.
-- The local port keeps the upstream `dog_policy` / `dog_privileged` / `arm_policy` / `arm_privileged` split, the same arm `6 + 2` output layout, and the same reward-scale tables.
-- Two implementation details are intentionally not byte-identical:
-  - stage1 arm freeze is implemented by masking arm action deltas to zero inside the IsaacLab action term, instead of directly overwriting DOF state every physics step as upstream does;
-  - foot-contact handling is stricter locally because four dedicated foot sensors are used to recover precise legal support contacts.
-
-#### 1. Privileged Information
-
-For the RoboDuet task in `config/locomanip/go2arm/rough_env_cfg.py`:
-
-- `dog_privileged`: 2 dims
-  - mean foot friction
-  - mean foot restitution
-- `arm_privileged`: 9 dims
-  - mean foot friction
-  - mean foot restitution
-  - current `l, p, y` of the grasper in the yaw-aligned base frame
-  - current end-effector quaternion in the yaw-aligned base frame
-
-This matches upstream `dog_num_privileged_obs = 2` and `arm_num_privileged_obs = 9`.
-
-#### 2. Rewards
-
-Stage1 uses `PRETRAINED_REWARD_SCALES`. After the RoboDuet stage switch, rewards change to `HYBRID_REWARD_SCALES`.
-
-Dog-stage / shared terms:
-
-- `tracking_lin_vel = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`
-- `tracking_ang_vel = exp(-(cmd_yaw - w_z_body)^2 / 0.25)`
-- `lin_vel_z = vz_body^2`
-- `ang_vel_xy = wx_body^2 + wy_body^2`
-- `orientation_control`: projected-gravity mismatch to the commanded body pitch/roll
-- `loco_energy`: sum of squared leg joint power
-- `feet_slip`: support-foot planar velocity penalty
-- `feet_clearance_cmd_linear`: swing-foot height tracking penalty
-- `tracking_contacts_shaped_force`: swing phase should have low contact force
-- `tracking_contacts_shaped_vel`: stance phase should have low foot velocity
-- `collision`: illegal non-foot contact count
-- `dof_vel`, `dof_acc`: leg joint velocity / acceleration penalties
-- `action_rate`: leg action difference penalty
-- `action_smoothness_1`, `action_smoothness_2`: first/second-order leg target smoothness penalties
-- `torques`: squared leg torque penalty
-- `hip_action_l2`: squared hip action penalty
-
-Arm / hybrid-only extra terms:
-
-- `arm_manip_commands_tracking_combine = exp(-(3 * lpy_error + 1 * rpy_error))`
-  - `lpy_error` is normalized by sampled `l/p/y` range
-  - `rpy_error` is normalized by sampled `roll/pitch/yaw` range after conversion to upstream `abg`
-- `arm_energy`: squared arm joint power
-- `arm_dof_vel`, `arm_dof_acc`: arm joint velocity / acceleration penalties
-- `arm_action_rate`: arm action difference penalty
-- `arm_action_smoothness_1`, `arm_action_smoothness_2`: first/second-order arm target smoothness penalties
-- `arm_control_smoothness_1`: plan-action smoothness penalty on the extra `pitch/roll` planner outputs
-- `arm_control_limits`: penalty when planner outputs exceed commanded body pitch/roll limits
-
-Final aggregation follows upstream:
-
-- every enabled metric is multiplied by its stage-specific scale and added to the dog reward
-- all terms except `tracking_lin_vel` and `tracking_ang_vel` are also added to the arm reward
-- final reward uses the Ji22-style positive/negative composition:
-  - `reward = reward_pos * exp(reward_neg / sigma_rew_neg)`, with `sigma_rew_neg = 0.02`
-
-#### 3. Command Sampling, Filtering, Resampling, Frames
-
-Locomotion command:
-
-- sampled from the RoboDuet curriculum bins over
-  - `x in [-1.0, 1.0]`
-  - `y in [-0.6, 0.6]`
-  - `yaw in [-1.0, 1.0]`
-  - stage1-only body pitch/roll bins in `[-0.4, 0.4]`
-- 10% of sampled velocity commands are forced to zero
-- tiny commands are thresholded to zero:
-  - `|x| <= 0.07`
-  - `|y| <= 0.07`
-  - `|yaw| <= 0.10`
-- resampled every `10.0s` inside an episode, and also on reset
-
-Arm command:
-
-- sampled uniformly, with no extra reject-cuboid or IK/workspace filter:
-  - `l in [0.3, 0.77]`
-  - `p in [-0.45pi, 0.45pi]`
-  - `y in [-pi/2, pi/2]`
-  - `roll in [-0.45pi, 0.45pi]`
-  - `pitch in [-60deg, 60deg]`
-  - `yaw in [-75deg, 75deg]`
-- resampled on reset and then every `T_traj ~ U(2.0, 3.0)s`
-- arm resampling is disabled before the RoboDuet stage switch; stage1 exposes zero arm command to the actor
-
-Frames:
-
-- dog velocity commands are compared against base-frame linear/angular velocity
-- arm `l/p/y` is expressed in a yaw-aligned base frame, with `z` measured relative to ground height
-- arm orientation command/observation uses the upstream `abg` parameterization of the end-effector quaternion in the same yaw-aligned base frame
-
-#### 4. Stage1 Arm Freeze and Network / Controller I/O
-
-Upstream behavior:
-
-- `keep_arm_fixed = True`
-- when `switch_open == False`, upstream directly resets arm DOF position to default and arm DOF velocity to zero every physics step
-
-Local IsaacLab port:
-
-- the runner resolves the same stage-switch iteration as upstream
-- before switch:
-  - the arm PPO is not stepped
-  - the environment executes zero arm actions
-  - the joint action term forces joints `joint1..joint6` to use zero delta action
-- because the Go2Arm action term is default-centered, zero arm delta means the arm controller target stays at the default arm posture
-
-Network I/O:
-
-- dog policy input:
-  - `projected_gravity(3) + leg_joint_pos(12) + leg_joint_vel(12) + leg_action(12) + dog_cmd(5) + arm_cmd_obs(6) + roll_pitch(2) + clock(4) = 56`
-- dog privileged input:
-  - `2`
-- dog output:
-  - `12` leg action dims
-- arm policy input:
-  - `arm_joint_pos(6) + arm_action(6) + arm_cmd_obs(6) + roll_pitch(2) = 20`
-- arm privileged input:
-  - `9`
-- arm output:
-  - `8 = 6 arm joint-action dims + 2 plan-action dims`
-
-Executed controller chain:
-
-1. arm network outputs `8` dims
-2. first `6` dims become arm joint delta actions
-3. last `2` dims become planner outputs and are mapped to commanded body `pitch/roll`
-4. the joint action term rescales all joint deltas by `0.25`
-5. hip joint deltas are additionally multiplied by `0.5`
-6. final joint-position target is `default_joint_pos + delta`
-7. the robot arm actuator is `DelayedPDActuatorCfg(joint1..joint6)`, so the low-level controller receives joint position targets rather than torque commands
-
-Play-mode note:
-
-- `scripts/reinforcement_learning/rsl_rl/play.py` explicitly sets `fixed_delta_action_until_iteration = 0`, so playback does not re-enable the stage1 arm freeze.
+- 当前迁移目标聚焦本地 `go2arm` 任务，不包含上游 `go1` 分支
+- 默认资产链路仍然是本地 `Go2 + Piper`，不会直接把所有流程切到上游 URDF
+- `rough` 是建立在 flat 基线之上的本地扩展任务，不属于上游 `auto_train` 的默认配置
+- 这份 README 目前是偏“可用性 + 仓库导览”的初版，后续可以再补充更细的任务设计说明
 
 ## Citation
 
-This repository is a modified version of `robot_lab`.
+This repository is a modified local variant of `robot_lab`.
