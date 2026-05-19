@@ -439,6 +439,20 @@ def _configure_go2arm_fixed_arm_play_command(env_cfg) -> bool:
     return True
 
 
+def _tighten_go2arm_fixed_arm_play_reset_randomization(env_cfg) -> None:
+    """Reduce reset noise when evaluating one fixed RoboDuet arm target."""
+    try:
+        env_cfg.events.randomize_reset_joints.params["position_range"] = (-0.01, 0.01)
+        env_cfg.events.randomize_reset_joints.params["velocity_range"] = (-0.02, 0.02)
+        env_cfg.events.randomize_reset_base.params["pose_range"] = {
+            "x": (-0.02, 0.02),
+            "y": (-0.02, 0.02),
+            "yaw": (-0.05, 0.05),
+        }
+    except Exception:
+        return
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -500,7 +514,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if fixed_roboduet_play:
             print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time dog-command resampling.")
         if fixed_arm_play:
+            _tighten_go2arm_fixed_arm_play_reset_randomization(env_cfg)
             print("[INFO] Go2Arm play override: fixed RoboDuet arm position command; planner body pitch/roll still comes from the arm policy.")
+            print("[INFO] Go2Arm play override: tightened reset randomization for fixed-arm evaluation.")
     else:
         if env_cfg.observations.policy is not None:
             env_cfg.observations.policy.enable_corruption = False
