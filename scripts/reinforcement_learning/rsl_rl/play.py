@@ -72,10 +72,10 @@ parser.add_argument(
 parser.add_argument(
     "--go2arm_dog_cmd",
     type=float,
-    nargs=3,
-    metavar=("VX", "VY", "WZ"),
+    nargs="+",
+    metavar=("CMD",),
     default=None,
-    help="Fixed RoboDuet dog command for Go2Arm play: vx, vy, yaw-rate. Randomly sampled once if omitted.",
+    help="Fixed RoboDuet dog command for Go2Arm play. Stage2 expects 3 values: vx vy wz. Stage1 expects 5 values: vx vy wz pitch roll.",
 )
 parser.add_argument(
     "--go2arm_arm_cmd",
@@ -122,7 +122,7 @@ from isaaclab.envs import (
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_mul
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -159,109 +159,105 @@ def _fmt_tensor(values: torch.Tensor, max_items: int = 12) -> list[float]:
     return [round(float(x), 4) for x in values[:max_items].tolist()]
 
 
+def _go2arm_ground_height_under_base(env) -> torch.Tensor:
+    if "height_scanner_base" not in env.unwrapped.scene.sensors:
+        return torch.zeros(env.unwrapped.num_envs, device=env.unwrapped.device)
+    sensor = env.unwrapped.scene.sensors["height_scanner_base"]
+    ray_hits = sensor.data.ray_hits_w[..., 2]
+    if torch.isnan(ray_hits).any() or torch.isinf(ray_hits).any() or torch.max(torch.abs(ray_hits)) > 1.0e6:
+        return torch.zeros(env.unwrapped.num_envs, device=env.unwrapped.device)
+    return torch.mean(ray_hits, dim=1)
+
+
+def _go2arm_body_yaw_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    forward = quat_apply(
+        quat_wxyz,
+        torch.tensor([1.0, 0.0, 0.0], device=quat_wxyz.device, dtype=quat_wxyz.dtype).expand(quat_wxyz.shape[0], 3),
+    )
+    yaw = torch.atan2(forward[:, 1], forward[:, 0])
+    zeros = torch.zeros_like(yaw)
+    half_yaw = 0.5 * yaw
+    return torch.stack((torch.cos(half_yaw), zeros, zeros, torch.sin(half_yaw)), dim=-1)
+
+
+def _go2arm_roll_pitch_from_quat(quat_wxyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    w, x, y, z = quat_wxyz.unbind(dim=-1)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = torch.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (w * y - z * x)
+    pitch = torch.atan2(sinp, torch.sqrt(torch.clamp(1.0 - sinp * sinp, min=1.0e-8)))
+    return roll, pitch
+
+
+def _go2arm_effective_ee_pos_w(env, command_term, robot) -> torch.Tensor:
+    ee_pos_w = robot.data.body_pos_w[:, command_term.ee_body_idx]
+    ee_quat_w = robot.data.body_quat_w[:, command_term.ee_body_idx]
+    rot_offset = getattr(getattr(env.unwrapped, "cfg", None), "roboduet_ee_rot_offset_wxyz", (1.0, 0.0, 0.0, 0.0))
+    pos_offset = getattr(getattr(env.unwrapped, "cfg", None), "roboduet_ee_pos_offset_local", (0.0, 0.0, 0.0))
+    rot_offset_tensor = torch.tensor(rot_offset, device=ee_quat_w.device, dtype=ee_quat_w.dtype).unsqueeze(0)
+    pos_offset_tensor = torch.tensor(pos_offset, device=ee_pos_w.device, dtype=ee_pos_w.dtype).unsqueeze(0)
+    ee_quat_w = quat_mul(ee_quat_w, rot_offset_tensor.expand(ee_quat_w.shape[0], -1))
+    return ee_pos_w + quat_apply(ee_quat_w, pos_offset_tensor.expand(ee_pos_w.shape[0], -1))
+
+
 def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs: dict[str, torch.Tensor] | None = None) -> None:
-    """Print only direction-relevant Go2Arm diagnostics for backwards-walking debugging."""
+    """Print compact Go2Arm command-vs-execution diagnostics."""
     robot = env.unwrapped.scene["robot"]
-    action_manager = env.unwrapped.action_manager
-    try:
-        action_term = action_manager.get_term("joint_pos")
-    except KeyError:
-        action_term = None
-
-    current_action = action_manager.action[0].detach().cpu()
-    policy_action = policy_action.detach().cpu()
-    effective_action = getattr(env.unwrapped, "_go2arm_effective_action", None)
-    if torch.is_tensor(effective_action):
-        effective_action = effective_action[0].detach().cpu()
-    else:
-        effective_action = current_action
-
-    root_quat_w = robot.data.root_quat_w[0].detach().cpu()
-    root_lin_vel_w = getattr(robot.data, "root_lin_vel_w", None)
-    root_lin_vel_b = getattr(robot.data, "root_lin_vel_b", None)
-    root_ang_vel_b = getattr(robot.data, "root_ang_vel_b", None)
-    if torch.is_tensor(root_lin_vel_w):
-        root_lin_vel_w = root_lin_vel_w[0].detach().cpu()
-    else:
-        root_lin_vel_w = torch.zeros(3)
-    if torch.is_tensor(root_lin_vel_b):
-        root_lin_vel_b = root_lin_vel_b[0].detach().cpu()
-    else:
-        root_lin_vel_b = torch.zeros(3)
-    if torch.is_tensor(root_ang_vel_b):
-        root_ang_vel_b = root_ang_vel_b[0].detach().cpu()
-    else:
-        root_ang_vel_b = torch.zeros(3)
-
-    forward_w = quat_apply(root_quat_w.unsqueeze(0), torch.tensor([[1.0, 0.0, 0.0]])).squeeze(0)
-    forward_xy = forward_w[:2]
-    forward_xy_norm = torch.linalg.norm(forward_xy).clamp_min(1.0e-6)
-    forward_xy_unit = forward_xy / forward_xy_norm
-    speed_along_forward_w = torch.dot(root_lin_vel_w[:2], forward_xy_unit)
-    yaw_w = torch.atan2(forward_w[1], forward_w[0])
-
-    cmd_raw = torch.zeros(5)
-    cmd_scaled = torch.zeros(5)
-    arm_cmd_obs = torch.zeros(6)
-    switch_open = False
     try:
         command_term = env.unwrapped.command_manager.get_term("roboduet")
-        switch_open = bool(command_term.switch_open)
-        cmd_raw = command_term.commands_dog[0].detach().cpu()
-        cmd_scaled = (command_term.commands_dog[0] * command_term.commands_scale_dog[0]).detach().cpu()
-        arm_cmd_obs = command_term.commands_arm_obs[0].detach().cpu()
+    except KeyError:
+        print(f"[GO2ARM step={step}] command_error=missing_roboduet_term")
+        return
     except Exception as exc:  # noqa: BLE001
         print(f"[GO2ARM DIR step={step}] command_error={type(exc).__name__}: {exc}")
+        return
 
-    obs_cmd = torch.full((5,), float("nan"))
-    obs_pg = torch.full((3,), float("nan"))
-    obs_rp = torch.full((2,), float("nan"))
-    dog_obs_tensor = None
-    if obs is not None:
-        try:
-            dog_obs_tensor = obs["dog_policy"]
-        except (KeyError, TypeError, AttributeError):
-            dog_obs_tensor = None
-    if torch.is_tensor(dog_obs_tensor):
-        dog_obs = dog_obs_tensor[0].detach().cpu()
-        obs_pg = dog_obs[0:3]
-        obs_cmd = dog_obs[39:44]
-        obs_rp = dog_obs[50:52]
+    del policy_action, obs
+    root_pos_w = robot.data.root_pos_w
+    root_quat_w = robot.data.root_quat_w
+    root_lin_vel_b = robot.data.root_lin_vel_b
+    root_ang_vel_b = robot.data.root_ang_vel_b
+    yaw_quat = _go2arm_body_yaw_quat(root_quat_w)
+    ground_height = _go2arm_ground_height_under_base(env)
+    ee_pos_w = _go2arm_effective_ee_pos_w(env, command_term, robot)
+    ee_delta_yaw = quat_apply_inverse(yaw_quat, ee_pos_w - root_pos_w)
+    roll_b, pitch_b = _go2arm_roll_pitch_from_quat(root_quat_w)
 
-    leg_torque_target = getattr(env.unwrapped, "_go2arm_leg_torque_target", None)
-    if torch.is_tensor(leg_torque_target):
-        tau_norm = float(leg_torque_target[0].detach().cpu().norm().item())
-    else:
-        tau_norm = 0.0
-    leg_position_target = getattr(action_term, "_leg_position_target", None) if action_term is not None else None
-    if torch.is_tensor(leg_position_target):
-        target_norm = float(leg_position_target[0].detach().cpu().norm().item())
-    else:
-        target_norm = 0.0
+    dog_cmd = command_term.commands_dog[0].detach().cpu()
+    dog_real = torch.stack(
+        (
+            root_lin_vel_b[0, 0],
+            root_lin_vel_b[0, 1],
+            root_ang_vel_b[0, 2],
+            pitch_b[0],
+            roll_b[0],
+        )
+    ).detach().cpu()
+
+    arm_cmd_lpy = command_term.commands_arm_obs[0, :3]
+    arm_cmd_xyz = command_term._arm_lpy_to_local_xyz(arm_cmd_lpy.unsqueeze(0)).squeeze(0)
+    arm_cmd_xy_zw = torch.stack((arm_cmd_xyz[0], arm_cmd_xyz[1], arm_cmd_xyz[2] + ground_height[0] + 0.38)).detach().cpu()
+    arm_real_xy_zw = torch.stack((ee_delta_yaw[0, 0], ee_delta_yaw[0, 1], ee_pos_w[0, 2])).detach().cpu()
 
     print(
-        f"[GO2ARM DIR step={step}] switch_open={switch_open} "
-        f"cmd_raw={_fmt_tensor(cmd_raw, 5)} cmd_obs={_fmt_tensor(obs_cmd, 5)} "
-        f"vel_b={_fmt_tensor(root_lin_vel_b, 3)} vel_w={_fmt_tensor(root_lin_vel_w, 3)} "
-        f"forward_xy={_fmt_tensor(forward_xy_unit, 2)} yaw_w={float(yaw_w.item()):.4f} "
-        f"v_forward_w={float(speed_along_forward_w.item()):.4f} "
-        f"cmd_x={float(cmd_raw[0].item()):.4f} vx_b={float(root_lin_vel_b[0].item()):.4f} "
-        f"backwards={(float(cmd_raw[0].item()) * float(root_lin_vel_b[0].item())) < -0.05}"
+        f"[GO2ARM DOG step={step}] switch_open={bool(command_term.switch_open)} "
+        f"cmd(vx,vy,wz,pitch,roll)={_fmt_tensor(dog_cmd, 5)} "
+        f"real(vx,vy,wz,pitch,roll)={_fmt_tensor(dog_real, 5)}"
     )
     print(
-        f"[GO2ARM DIR step={step}] obs_pg={_fmt_tensor(obs_pg, 3)} obs_rp={_fmt_tensor(obs_rp, 2)} "
-        f"arm_lpy={_fmt_tensor(arm_cmd_obs[:3], 3)} arm_abg={_fmt_tensor(arm_cmd_obs[3:6], 3)} "
-        f"cmd_pitch={float(cmd_raw[3].item()):.4f} cmd_roll={float(cmd_raw[4].item()):.4f} "
-        f"pitch_b={float(obs_rp[1].item()):.4f} roll_b={float(obs_rp[0].item()):.4f} "
-        f"act_FL={_fmt_tensor(effective_action[0:3], 3)} act_FR={_fmt_tensor(effective_action[3:6], 3)} "
-        f"act_RL={_fmt_tensor(effective_action[6:9], 3)} act_RR={_fmt_tensor(effective_action[9:12], 3)} "
-        f"policy_norm={float(policy_action[:12].norm().item()):.4f} target_norm={target_norm:.4f} tau_norm={tau_norm:.4f}"
+        f"[GO2ARM ARM step={step}] "
+        f"cmd_lpy={_fmt_tensor(arm_cmd_lpy, 3)} "
+        f"cmd(x_b,y_b,z_w)={_fmt_tensor(arm_cmd_xy_zw, 3)} "
+        f"real(x_b,y_b,z_w)={_fmt_tensor(arm_real_xy_zw, 3)}"
     )
  
  
-def _sample_go2arm_dog_command_once(roboduet_cfg) -> tuple[float, float, float]:
-    """Sample one non-zero dog velocity command from the configured RoboDuet ranges."""
-    ranges = (roboduet_cfg.lin_vel_x, roboduet_cfg.lin_vel_y, roboduet_cfg.ang_vel_yaw)
+def _sample_go2arm_dog_command_once(roboduet_cfg, *, include_body: bool = False) -> tuple[float, ...]:
+    """Sample one non-zero dog command from the configured RoboDuet ranges."""
+    ranges = [roboduet_cfg.lin_vel_x, roboduet_cfg.lin_vel_y, roboduet_cfg.ang_vel_yaw]
+    if include_body:
+        ranges.extend((roboduet_cfg.body_pitch_range, roboduet_cfg.body_roll_range))
     for _ in range(100):
         command = tuple(
             float(torch.empty((), dtype=torch.float32).uniform_(float(cmd_range[0]), float(cmd_range[1])).item())
@@ -272,18 +268,29 @@ def _sample_go2arm_dog_command_once(roboduet_cfg) -> tuple[float, float, float]:
     return tuple(float((cmd_range[0] + cmd_range[1]) * 0.5) for cmd_range in ranges)
 
 
+def _resolve_go2arm_fixed_dog_command(roboduet_cfg, *, stage1: bool) -> tuple[tuple[float, ...], str]:
+    """Resolve and validate the fixed RoboDuet dog command for play."""
+    if args_cli.go2arm_dog_cmd is None:
+        dog_cmd = _sample_go2arm_dog_command_once(roboduet_cfg, include_body=stage1)
+        return dog_cmd, "sampled"
+
+    dog_cmd = tuple(float(value) for value in args_cli.go2arm_dog_cmd)
+    expected_dims = 5 if stage1 else 3
+    if len(dog_cmd) != expected_dims:
+        stage_name = "stage1" if stage1 else "stage2"
+        raise ValueError(
+            f"{stage_name} play expects --go2arm_dog_cmd to provide {expected_dims} values, got {len(dog_cmd)}: {dog_cmd}."
+        )
+    return dog_cmd, "cli"
+
+
 def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
     """Keep RoboDuet play in stage1 and use one fixed dog command for playback."""
     roboduet_cfg = getattr(getattr(env_cfg, "commands", None), "roboduet", None)
     if roboduet_cfg is None:
         return False
 
-    if args_cli.go2arm_dog_cmd is None:
-        dog_cmd = _sample_go2arm_dog_command_once(roboduet_cfg)
-        dog_cmd_source = "sampled"
-    else:
-        dog_cmd = tuple(float(value) for value in args_cli.go2arm_dog_cmd)
-        dog_cmd_source = "cli"
+    dog_cmd, dog_cmd_source = _resolve_go2arm_fixed_dog_command(roboduet_cfg, stage1=True)
     fixed_time_s = float(_GO2ARM_PLAY_FIXED_COMMAND_TIME_S)
     stage1_switch_iteration = int(_GO2ARM_PLAY_STAGE1_ONLY_SWITCH_ITERATION)
 
@@ -306,7 +313,7 @@ def _configure_go2arm_stage1_dog_play(env_cfg, agent_cfg) -> bool:
 
     print(
         "[INFO] Go2Arm RoboDuet stage1 dog play command: "
-        f"source={dog_cmd_source}, dog(vx,vy,wz)={dog_cmd}, "
+        f"source={dog_cmd_source}, dog(vx,vy,wz,pitch,roll)={dog_cmd}, "
         f"resampling_time_s={fixed_time_s:g}, switch_iteration={stage1_switch_iteration}."
     )
     return True
@@ -323,8 +330,7 @@ def _configure_go2arm_stage2_play(env_cfg, agent_cfg) -> bool:
         dog_cmd = (0.0, 0.0, 0.0)
         dog_cmd_source = "default_zero"
     else:
-        dog_cmd = tuple(float(value) for value in args_cli.go2arm_dog_cmd)
-        dog_cmd_source = "cli"
+        dog_cmd, dog_cmd_source = _resolve_go2arm_fixed_dog_command(roboduet_cfg, stage1=False)
     fixed_time_s = float(_GO2ARM_PLAY_FIXED_COMMAND_TIME_S)
     stage2_switch_iteration = 0
 

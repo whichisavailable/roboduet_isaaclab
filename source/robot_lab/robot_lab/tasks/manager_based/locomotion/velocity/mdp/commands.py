@@ -873,7 +873,7 @@ class RoboDuetCommandCfg(CommandTermCfg):
     commands_scale_dog: tuple[float, float, float, float, float] = (2.0, 2.0, 0.25, 1.0, 1.0)
     # Play-time overrides.  When set by play.py, reset/update keep the dog command
     # fixed instead of using the training-time curriculum and random command resampling.
-    fixed_play_dog_command: tuple[float, float, float] | None = None
+    fixed_play_dog_command: tuple[float, ...] | None = None
     fixed_play_arm_command: tuple[float, float, float] | None = None
     disable_play_resampling: bool = False
  
@@ -982,11 +982,14 @@ class RoboDuetCommand(CommandTerm):
         if env_ids.numel() == 0:
             return True
         fixed_command_tensor = torch.tensor(fixed_command, device=self.device, dtype=torch.float32)
-        if fixed_command_tensor.numel() != 3:
-            raise ValueError(f"fixed_play_dog_command expects 3 values, got {fixed_command}.")
-        self.commands_dog[env_ids, :3] = fixed_command_tensor.unsqueeze(0).expand(env_ids.numel(), -1)
-        if not self.switch_open:
-            # During stage1 dog-only play the planner/body pitch-roll channels must stay inactive.
+        if fixed_command_tensor.numel() not in (3, 5):
+            raise ValueError(f"fixed_play_dog_command expects 3 or 5 values, got {fixed_command}.")
+        self.commands_dog[env_ids, :3] = fixed_command_tensor[:3].unsqueeze(0).expand(env_ids.numel(), -1)
+        if fixed_command_tensor.numel() == 5:
+            self.commands_dog[env_ids, 3:5] = fixed_command_tensor[3:5].unsqueeze(0).expand(env_ids.numel(), -1)
+        elif not self.switch_open:
+            # Stage1 dog-only playback requires explicit pitch/roll commands. If only
+            # velocity terms were provided, keep the body-command channels inactive.
             self.commands_dog[env_ids, 3:5] = 0.0
         return True
  
