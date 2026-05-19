@@ -42,6 +42,15 @@ parser.add_argument(
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
 parser.add_argument(
+    "--roboduet_urdf",
+    action="store_true",
+    default=False,
+    help=(
+        "Use the RoboDuet upstream auto_train robot=go2 URDF and its matching end-effector tool-frame offsets. "
+        "Required when comparing against roboduet_go2piper-trained checkpoints."
+    ),
+)
+parser.add_argument(
     "--go2arm_ee_pos",
     type=float,
     nargs=3,
@@ -133,6 +142,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import robot_lab.tasks  # noqa: F401  # isort: skip
 from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.callable_resolver import (
     resolve_callable,
+)
+from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.roboduet_urdf import (
+    apply_roboduet_go2piper_overrides,
 )
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -396,6 +408,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if "go2arm" in task_name.lower() and args_cli.roboduet_urdf:
+        apply_roboduet_go2piper_overrides(env_cfg)
+        print("[INFO] RoboDuet URDF override enabled for play: using upstream auto_train robot=go2 go2piper URDF.")
 
     # spawn the robot randomly in the grid (instead of their terrain levels)
     env_cfg.scene.terrain.max_init_terrain_level = None
