@@ -77,6 +77,14 @@ parser.add_argument(
     default=None,
     help="Fixed RoboDuet dog command for Go2Arm play: vx, vy, yaw-rate. Randomly sampled once if omitted.",
 )
+parser.add_argument(
+    "--go2arm_arm_cmd",
+    type=float,
+    nargs=3,
+    metavar=("L", "P", "Y"),
+    default=None,
+    help="Fixed RoboDuet arm position command for Go2Arm play in l/p/y. Orientation command still samples internally.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -194,12 +202,14 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
 
     cmd_raw = torch.zeros(5)
     cmd_scaled = torch.zeros(5)
+    arm_cmd_obs = torch.zeros(6)
     switch_open = False
     try:
         command_term = env.unwrapped.command_manager.get_term("roboduet")
         switch_open = bool(command_term.switch_open)
         cmd_raw = command_term.commands_dog[0].detach().cpu()
         cmd_scaled = (command_term.commands_dog[0] * command_term.commands_scale_dog[0]).detach().cpu()
+        arm_cmd_obs = command_term.commands_arm_obs[0].detach().cpu()
     except Exception as exc:  # noqa: BLE001
         print(f"[GO2ARM DIR step={step}] command_error={type(exc).__name__}: {exc}")
 
@@ -240,6 +250,9 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
     )
     print(
         f"[GO2ARM DIR step={step}] obs_pg={_fmt_tensor(obs_pg, 3)} obs_rp={_fmt_tensor(obs_rp, 2)} "
+        f"arm_lpy={_fmt_tensor(arm_cmd_obs[:3], 3)} arm_abg={_fmt_tensor(arm_cmd_obs[3:6], 3)} "
+        f"cmd_pitch={float(cmd_raw[3].item()):.4f} cmd_roll={float(cmd_raw[4].item()):.4f} "
+        f"pitch_b={float(obs_rp[1].item()):.4f} roll_b={float(obs_rp[0].item()):.4f} "
         f"act_FL={_fmt_tensor(effective_action[0:3], 3)} act_FR={_fmt_tensor(effective_action[3:6], 3)} "
         f"act_RL={_fmt_tensor(effective_action[6:9], 3)} act_RR={_fmt_tensor(effective_action[9:12], 3)} "
         f"policy_norm={float(policy_action[:12].norm().item()):.4f} target_norm={target_norm:.4f} tau_norm={tau_norm:.4f}"
@@ -335,6 +348,34 @@ def _configure_go2arm_stage2_play(env_cfg, agent_cfg) -> bool:
     return True
 
 
+def _configure_go2arm_fixed_arm_play_command(env_cfg) -> bool:
+    """Optionally pin RoboDuet arm position commands during stage2 play."""
+    roboduet_cfg = getattr(getattr(env_cfg, "commands", None), "roboduet", None)
+    if roboduet_cfg is None or args_cli.go2arm_arm_cmd is None:
+        return False
+
+    arm_cmd = tuple(float(value) for value in args_cli.go2arm_arm_cmd)
+    l_cmd, p_cmd, y_cmd = arm_cmd
+    if not (float(roboduet_cfg.l_range[0]) <= l_cmd <= float(roboduet_cfg.l_range[1])):
+        raise ValueError(
+            f"--go2arm_arm_cmd l={l_cmd} is outside RoboDuet l_range={tuple(float(v) for v in roboduet_cfg.l_range)}."
+        )
+    if not (float(roboduet_cfg.p_range[0]) <= p_cmd <= float(roboduet_cfg.p_range[1])):
+        raise ValueError(
+            f"--go2arm_arm_cmd p={p_cmd} is outside RoboDuet p_range={tuple(float(v) for v in roboduet_cfg.p_range)}."
+        )
+    if not (float(roboduet_cfg.y_range[0]) <= y_cmd <= float(roboduet_cfg.y_range[1])):
+        raise ValueError(
+            f"--go2arm_arm_cmd y={y_cmd} is outside RoboDuet y_range={tuple(float(v) for v in roboduet_cfg.y_range)}."
+        )
+    roboduet_cfg.fixed_play_arm_command = arm_cmd
+    print(
+        "[INFO] Go2Arm RoboDuet fixed arm play command: "
+        f"arm(l,p,y)={arm_cmd}; ee orientation command still samples internally."
+    )
+    return True
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -381,10 +422,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             fixed_roboduet_play = _configure_go2arm_stage2_play(env_cfg, agent_cfg)
             play_stage = "stage2 whole-body"
+        fixed_arm_play = False
+        if args_cli.go2arm_arm_cmd is not None:
+            if args_cli.stage1:
+                print("[INFO] Go2Arm play override: ignoring --go2arm_arm_cmd because --stage1 keeps RoboDuet arm commands inactive.")
+            else:
+                fixed_arm_play = _configure_go2arm_fixed_arm_play_command(env_cfg)
         print("[INFO] Go2Arm play override: disabled RoboDuet eval-time DR/disturbances; reset randomization is kept.")
         print(f"[INFO] Go2Arm play override: using {play_stage} mode.")
         if fixed_roboduet_play:
-            print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time command resampling.")
+            print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time dog-command resampling.")
+        if fixed_arm_play:
+            print("[INFO] Go2Arm play override: fixed RoboDuet arm position command; planner body pitch/roll still comes from the arm policy.")
     else:
         if env_cfg.observations.policy is not None:
             env_cfg.observations.policy.enable_corruption = False

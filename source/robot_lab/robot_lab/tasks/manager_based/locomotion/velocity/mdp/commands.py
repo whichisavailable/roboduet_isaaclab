@@ -874,6 +874,7 @@ class RoboDuetCommandCfg(CommandTermCfg):
     # Play-time overrides.  When set by play.py, reset/update keep the dog command
     # fixed instead of using the training-time curriculum and random command resampling.
     fixed_play_dog_command: tuple[float, float, float] | None = None
+    fixed_play_arm_command: tuple[float, float, float] | None = None
     disable_play_resampling: bool = False
  
     def __post_init__(self):
@@ -984,8 +985,9 @@ class RoboDuetCommand(CommandTerm):
         if fixed_command_tensor.numel() != 3:
             raise ValueError(f"fixed_play_dog_command expects 3 values, got {fixed_command}.")
         self.commands_dog[env_ids, :3] = fixed_command_tensor.unsqueeze(0).expand(env_ids.numel(), -1)
-        # Keep planner/body pitch-roll commands inactive during stage1 dog-only playback.
-        self.commands_dog[env_ids, 3:5] = 0.0
+        if not self.switch_open:
+            # During stage1 dog-only play the planner/body pitch-roll channels must stay inactive.
+            self.commands_dog[env_ids, 3:5] = 0.0
         return True
  
     def _refresh_command_buffer(self) -> None:
@@ -1021,11 +1023,11 @@ class RoboDuetCommand(CommandTerm):
             )[0]
             if env_ids.numel() > 0:
                 self._resample_locomotion_commands(env_ids)
-            if self.switch_open:
-                self.arm_time += self._env.step_dt
-                env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
-                if env_ids.numel() > 0:
-                    self._resample_arm_commands(env_ids)
+        if self.switch_open:
+            self.arm_time += self._env.step_dt
+            env_ids = torch.where(self.arm_time >= self.T_trajs)[0]
+            if env_ids.numel() > 0:
+                self._resample_arm_commands(env_ids)
         self._step_contact_targets()
         self._refresh_command_buffer()
 
@@ -1105,9 +1107,21 @@ class RoboDuetCommand(CommandTerm):
         underground = xyz[:, 2] < self.arm_underground_limit
         return in_box | underground
 
-    def _resample_arm_commands(self, env_ids: torch.Tensor) -> None:
-        if env_ids.numel() == 0:
+    def _sample_arm_position_commands(self, env_ids: torch.Tensor) -> None:
+        fixed_arm_command = self.cfg.fixed_play_arm_command
+        if fixed_arm_command is not None:
+            fixed_arm_tensor = torch.tensor(fixed_arm_command, device=self.device, dtype=torch.float32)
+            if fixed_arm_tensor.numel() != 3:
+                raise ValueError(f"fixed_play_arm_command expects 3 values, got {fixed_arm_command}.")
+            invalid = self._arm_target_collision_mask(fixed_arm_tensor.unsqueeze(0))[0]
+            if bool(invalid.item()):
+                raise ValueError(
+                    "fixed_play_arm_command lies inside the arm collision exclusion box "
+                    f"or below the underground limit: {fixed_arm_command}."
+                )
+            self.commands_arm[env_ids] = fixed_arm_tensor.unsqueeze(0).expand(env_ids.numel(), -1)
             return
+
         self.commands_arm[env_ids, 0] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.l_range)
         self.commands_arm[env_ids, 1] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.p_range)
         self.commands_arm[env_ids, 2] = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.y_range)
@@ -1121,6 +1135,11 @@ class RoboDuetCommand(CommandTerm):
                 self.commands_arm[remaining, 0] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.l_range)
                 self.commands_arm[remaining, 1] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.p_range)
                 self.commands_arm[remaining, 2] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.y_range)
+
+    def _resample_arm_commands(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        self._sample_arm_position_commands(env_ids)
         self.commands_arm_obs[env_ids, :3] = self.commands_arm[env_ids]
         roll = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.roll_ee_range)
         pitch = torch.empty(env_ids.numel(), device=self.device).uniform_(*self.cfg.pitch_ee_range)
