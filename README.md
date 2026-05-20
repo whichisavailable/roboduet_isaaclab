@@ -250,7 +250,7 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
 #### Stage Switch
 
 - stage1：只训练 `dog PPO`
-- stage1：环境执行的 arm action 恒为 `0`，且会在每个仿真物理步把机械臂拉回默认位置，清空速度
+- stage1：环境执行的 arm action 恒为 `0`，且会在**每个物理仿真步把机械臂拉回默认位置，清空速度**
 - stage2：dog/arm 同时工作
 
 #### Final Action Execution
@@ -430,7 +430,7 @@ stage1 / stage2 的差别：
 
 当前 reward 主体在 `mdp/rewards.py::_compute_roboduet_reward_state()` 中统一计算。
 
-默认不是简单线性求和，而是采用 RoboDuet / Ji22 风格的正负项组合：
+默认采用 RoboDuet / Ji22 风格的正负项组合：
 
 ```text
 reward = reward_pos * exp(reward_neg / sigma_rew_neg)
@@ -442,14 +442,9 @@ reward = reward_pos * exp(reward_neg / sigma_rew_neg)
 - `only_positive_rewards_ji22_style = True`
 - `sigma_rew_neg = 0.05`
 
-其中：
-
-- `tracking_sigma = 0.25`
-- `tracking_sigma_yaw = 0.25`
-- `gait_force_sigma = 100.0`
-- `gait_vel_sigma = 10.0`
-
 ##### Stage 1 Reward Scales: `PRETRAINED_REWARD_SCALES`
+
+注意：部分奖励进行了调整，例如调大了sigma_rew_neg，调小了loco_energy和torque的权重，增大了步态相关的权重
 
 | term | scale |
 | --- | ---: |
@@ -529,7 +524,7 @@ Locomotion tracking：
 接触与步态：
 
 - `feet_slip`：接触脚的足端平面速度平方和
-- `feet_clearance_cmd_linear`：摆动脚足端高度对目标高度 `0.06 * phase + 0.02` 的误差平方
+- `feet_clearance_cmd_linear`：摆动脚足端高度对目标高度 `0.06 * phase + 0.02` 的误差平方（0.06代表摆腿高度，原仓库0.04）
 - `tracking_contacts_shaped_force`：摆动期应尽量少受力
 - `tracking_contacts_shaped_vel`：支撑期应尽量少移动
 - `collision`：非法 body 接触计数
@@ -540,136 +535,165 @@ arm manipulation：
 - `arm_manip_commands_tracking_combine`
   - 先计算当前末端 `lpy` 和目标 `lpy` 的归一化误差
   - 再计算当前末端 `abg` 和目标 `abg` 的归一化误差
-  - 当前默认权重从 `lpy:4.0 / rpy:0.0` 逐步过渡到 `lpy:3.0 / rpy:1.0`
+  - 当前默认权重从 `lpy:4.0 / rpy:0.0` 逐步过渡到 `lpy:3.0 / rpy:1.0`（原仓库直接给3/1，这里做一个课程）
   - 过渡时长 `5000` iterations
-- `vis_manip_commands_tracking_lpy = exp(-lpy_error)`
-- `vis_manip_commands_tracking_rpy = exp(-rpy_error)`
+- `vis_manip_commands_tracking_lpy = exp(-lpy_error)`（只用来看跟踪效果，不参与实际奖励计算）
+- `vis_manip_commands_tracking_rpy = exp(-rpy_error)`（只用来看跟踪效果，不参与实际奖励计算）
 
 约束项：
 
 - `torques`：腿部 torque target 平方和 + arm joint position target 平方和
-- `hip_action_l2`：4 个 hip action 的平方和
+- `hip_action_l2`：4 个 hip action 的平方和（只在stage2启用）
 - `dof_pos_limits`：越过 soft joint limits 的总量
 
-##### Omni Reward Modes
+#### Omni Reward Modes
 
-训练脚本中还保留了两个可选开关：
+训练脚本中保留了三个可选开关：
 
 - `--omni1`
 - `--omni2`
+- `--omni`（等价于--omni1+omni2）
 
-它们不是默认模式，但如果打开，会使用 RoboDuet 风格的 omni 正项聚合：
+它们不是默认模式，但如果打开，会使用omni风格的正项聚合：
 
 - stage1 omni：强化 `tracking_lin_vel` 和 `tracking_ang_vel`
 - stage2 omni：额外把 manipulation 正项并入 dog reward，同时单独塑造 arm reward
 
-#### 4.2 本地修改 / IsaacLab 实现补丁
 
-这一部分不是在改变“要对齐的 reward 目标”，而是在说明 **当前本地实现相对上游代码的实现层差异**。
+`--omni` 不会替换掉原来的 reward term 列表，也不会改各个 scale；它改的是**最后一步的总奖励聚合形式**。
 
-##### 1. 足端接触的实现更严格
+##### Stage1 Omni (`--omni1`)
 
-本地实现优先使用 `contact_forces` 共享传感器中“合法足端 patch”对应的精确接触力：
+stage1 下只对 dog reward 的正项聚合做增强，核心是把 tracking reward 从 `r` 改成 `r + r^5`：
 
-- `get_go2arm_precise_foot_contact_forces()`
-- `get_go2arm_precise_foot_normal_forces()`
-- `get_go2arm_precise_foot_contact_timers()`
+`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`  
+`r_yaw = exp(-(cmd_yaw - wz_body)^2 / 0.25)`
 
-因此：
+`R_pos,dog^omni = [1.0 * (r_lin + r_lin^5) + 0.5 * (r_yaw + r_yaw^5)] * dt`
 
-- `feet_slip`
-- `tracking_contacts_shaped_force`
-- `tracking_contacts_shaped_vel`
-- `feet_contact_state`
-- `feet_air_time`
+最终 dog reward 变成：
 
-这些项都会优先基于“合法足端 patch 聚合结果”来计算，而不是简单按 rigid body 级别接触力来算。
+`R_dog = 0.4 * (dt + R_pos,dog^omni) * exp(R_neg,dog / 0.05)`
 
-##### 2. `torques` 项做了上游语义修复
+这里的关键变化只有两点：
 
-本地实现里，`torques` 不只统计腿部 `applied_torque`，还会把 arm 的 joint position target 一起计入：
+- tracking 正项从 `r` 变成了 `r + r^5`
+- 最外层多了一个 `0.4 * (dt + ...)`
 
-```text
-torques = sum(leg_torque_target^2) + sum(arm_joint_pos_target^2)
-```
+stage1 下 arm 分支仍然按默认 Ji22 风格聚合；但训练语义上 stage1 仍然是 dog-only。
 
-这是为了更接近上游 `control_type="M"` 的 `auto_train` 语义。
+##### Stage2 Omni (`--omni2`)
 
-##### 3. manipulation 权重做了阶段过渡
+stage2 omni 不只是增强 locomotion tracking，还把 manipulation 正项显式并入 dog reward。
 
-`arm_manip_commands_tracking_combine` 里，`lpy` 和 `rpy` 的权重不是固定的：
+先定义：
 
-- 初始：`lpy = 4.0`, `rpy = 0.0`
-- 结束：`lpy = 3.0`, `rpy = 1.0`
-- 过渡长度：`5000` iterations
+`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`  
+`r_yaw = exp(-(cmd_yaw - wz_body)^2 / 0.25)`
 
-这属于本地实现里显式写出的细化逻辑。
+机械臂跟踪部分先计算归一化误差：
 
-##### 4. `vis_*` 项是日志项，不直接计入 manager reward
+- `e_lpy`：末端 `l/p/y` 相对命令的归一化误差
+- `e_rpy`：末端 `a/b/g` 相对命令的归一化误差
 
-- `vis_manip_commands_tracking_lpy`
-- `vis_manip_commands_tracking_rpy`
+stage2 中 manipulation 权重不是常数，而是在进入 stage2 后的前 `5000` iterations 内渐变：
 
-这两个项会被记录和导出，但不会像普通 reward term 一样直接贡献 manager 的最终 reward。
+- `w_lpy: 4.0 -> 3.0`
+- `w_rpy: 0.0 -> 1.0`
 
-##### 5. 命令课程里接触 shaping 项有额外偏置写法
+普通 stage2 reward term 里，manip tracking 项是：
 
-在命令 curriculum 日志累积时：
+`r_manip = exp(-(w_lpy * e_lpy + w_rpy * e_rpy))`
 
-- `tracking_contacts_shaped_force`
-- `tracking_contacts_shaped_vel`
+但在 omni 聚合里，用的是更强的形式：
 
-会带一个与 scale 和 `dt` 相关的 offset 累积方式，以保持和当前课程成功阈值逻辑一致。
+`r_pos = exp(-w_lpy * e_lpy)`  
+`r_ori = exp(-w_rpy * e_rpy)`  
+`r_manip^omni = (r_pos + r_pos^5) + r_pos * (r_ori + r_ori^5)`
 
-### 5. Terminations
+于是：
 
-当前 RoboDuet 对齐配置下，真正启用的 termination 比原始 `go2arm` 基础任务少很多。
+`R_pos,dog^omni = [0.7 * (r_lin + r_lin^5) + 0.25 * (r_yaw + r_yaw^5) + 1.0 * r_manip^omni] * dt`  
+`R_pos,arm^omni = [1.0 * r_manip^omni] * dt`
 
-#### Active
+最终：
 
-- `time_out`
-  - 固定 episode 长度 `1000` steps
-  - 对应 `20s`
+`R_dog = 0.3 * (dt + R_pos,dog^omni) * exp(R_neg,dog / 0.05)`  
+`R_arm = 0.3 * (dt + R_pos,arm^omni) * exp(R_neg,arm / 0.05)`
 
-- `base_height_termination`
-  - 使用 `roboduet_body_height_termination`
-  - 当前阈值：`minimum_height = 0.28`
-  - 在 plane 上直接比较 `base` 的高度
+stage2 omni 的关键点是：
 
-- `reverse_termination`
-  - 只在 stage2 打开后生效
-  - 当前参数：
-    - `roll_limit = 0.10`
-    - `pitch_limit = 0.20`
-    - `headupdown_thres = 0.10`
-    - `use_roll = False`
-    - `use_pitch = True`
-  - 代码里还要求 `arm_time / T_traj > 0.6`
-  - 也就是说当前更像是一个 **后半段轨迹中的 pitch 方向反向失败检测**
+- locomotion tracking 仍然用 `r + r^5` 增强
+- **arm tracking 也用 `r + r^5` 增强，且利用优先级使得位置跟踪优先被满足**。
+- dog 和 arm 两个分支都套上了 `(dt + ...) * exp(...)` 的 omni 聚合
+`--omni` 不是“多开几个 reward term”，而是把默认的正负项指数聚合，改成了带 tracking/manipulation 强化正项的 omni 聚合。
 
-#### Disabled In Current Aligned Flat Config
+### Terminations
 
-以下通用终止在当前 RoboDuet 对齐配置中被显式关闭：
+当前 RoboDuet 对齐配置下，真正启用的 termination 很少。  
+严格来说，活跃的终止项只有：
 
-- `terrain_out_of_bounds`
-- `non_foot_contact_termination`
-- `base_orientation_termination`
-- `joint_position_termination`
-- `joint_velocity_termination`
-- `joint_torque_termination`
-- `task_success`
+- stage1：`time_out` + `base_height_termination`
+- stage2：`time_out` + `base_height_termination` + `reverse_termination`
 
-因此在 stage1，有效的非超时终止基本只剩：
+#### `time_out`
 
-- `base_height_termination`
+- episode 长度固定为 `1000` steps
+- `dt = 0.02`
+- 所以单个 episode 最长 `20s`
+
+#### `base_height_termination`
+
+当前配置使用：
+
+- `minimum_height = 0.28`
+- `sensor_cfg = None`
+
+因此在当前 flat / plane 对齐配置下，它就是一个非常直接的判定：
+
+`z_base < 0.28 -> terminate`
+
+也就是说，这里比较的是 base 在世界坐标系下的高度，而不是“相对地形高度”版本。
+
+#### `reverse_termination`
+
+这个终止不是一个泛化的“翻车检测”，而是一个**只在 stage2 后半段 arm 轨迹中才启用的 pitch 方向失败判定**。
+
+当前配置是：
+
+- `roll_limit = 0.10`
+- `pitch_limit = 0.20`
+- `headupdown_thres = 0.10`
+- `use_roll = False`
+- `use_pitch = True`
+
+由于 `use_roll = False`，所以当前实际上**只检查 pitch，不检查 roll**。
+
+代码里先构造：
+
+`delta_z = l * sin(p) + 0.38 - z_base`
+
+其中 `l, p` 来自当前 arm 的 `lpy` 位置命令。  
+然后只有在轨迹已经走到后半段时才可能终止：
+
+`arm_time / T_traj > 0.6`
+
+满足这个时间条件后，再检查：
+
+- `pitch < -0.20` 且 `delta_z < -0.10` 时终止
+- `pitch > 0.20` 且 `delta_z > 0.10` 时终止
+
+所以这个 termination 更准确的描述应该是：
+
+- 它只在 stage2 生效
+- 它只在 arm 轨迹后半程生效
+- 它当前只看 pitch
+- 它本质上是在检查“base pitch 方向”和“当前 arm 目标相对 base 的垂向趋势”是否出现明显反向失配
+
 
 ### 6. Curriculum
 
-当前任务中的 curriculum 需要分成两层理解。
-
-#### Active Curriculum
-
-当前真正启用的是：
+当前启用的是：
 
 - RoboDuet locomotion command curriculum
 - RoboDuet stage switch curriculum
@@ -690,19 +714,10 @@ torques = sum(leg_torque_target^2) + sum(arm_joint_pos_target^2)
 
 stage switch curriculum：
 
-- `switch_iteration = 10000`：默认从 scratch
-- `switch_iteration = 2000`：当同时有 dog/arm pretrained checkpoint
+- `switch_iteration = 10000`：从0开始训练
 - `switch_iteration = 0`：显式关闭两阶段
 
-#### Disabled Curriculum
-
-本地 `go2arm` 以前的 `go2arm_reaching_stages` curriculum 在当前 RoboDuet 对齐配置中是关闭的：
-
-- `self.curriculum.go2arm_reaching_stages = None`
-
-也就是说当前 README 里不再把 `ee_pose` staged curriculum 当作 RoboDuet 主线逻辑来介绍。
-
-### 7. Events And Randomization
+### 7. Events
 
 当前 RoboDuet 对齐 flat 配置里，启用的 event / randomization 如下。
 
@@ -752,7 +767,7 @@ stage switch curriculum：
 - `randomize_apply_external_force_torque_ee`
 - `randomize_push_robot`
 
-另外环境配置里虽然保留了这些开关字段，但默认也是关闭状态：
+环境配置里保留了这些开关字段，但默认关闭状态：
 
 - `roboduet_randomize_gravity = False`
 - `roboduet_randomize_motor_strength = False`
@@ -772,30 +787,6 @@ stage switch curriculum：
 - push 关闭
 
 但会保留 reset 随机化。
-
-## Key Files
-
-最关键的文件如下：
-
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/flat_env_cfg.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/rough_env_cfg.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/agents/rsl_rl_ppo_cfg.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/agents/automatic_models.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/locomanip/go2arm/agents/automatic_runner.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/commands.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/observations.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/rewards.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/terminations.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/events.py`
-- `source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/mdp/curriculums.py`
-- `scripts/reinforcement_learning/rsl_rl/train.py`
-- `scripts/reinforcement_learning/rsl_rl/play.py`
-
-## Notes
-
-- 当前 README 的主叙述是：**对齐 RoboDuet，且当前只把 flat 任务作为主线**
-- `rough` 任务 ID 目前更多是兼容入口，而不是一个独立完成的 rough-terrain RoboDuet 版本
-- 如果后续开始真正做 rough terrain，对应说明应单独拆分，不建议继续把它和当前 flat 对齐说明混写
 
 ## Citation
 
