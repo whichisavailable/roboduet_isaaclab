@@ -63,9 +63,7 @@ class AutomaticPPO:
         self.num_adaptation_module_substeps = num_adaptation_module_substeps
         self.selective_adaptation_module_loss = selective_adaptation_module_loss
         self.symmetry = resolve_callable(symmetry_callable) if symmetry_callable else None
-        self.symmetry_mirror_action = (
-            resolve_callable(symmetry_mirror_callable) if symmetry_mirror_callable else None
-        )
+        self.symmetry_mirror_action = resolve_callable(symmetry_mirror_callable) if symmetry_mirror_callable else None
         self.symmetry_enabled = self.symmetry is not None
         if self.symmetry_enabled and self.symmetry_mirror_action is None:
             raise ValueError("symmetry_mirror_callable is required when symmetry_callable is enabled.")

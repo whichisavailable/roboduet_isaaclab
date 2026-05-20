@@ -5,15 +5,9 @@ from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
 
-_RUNNER_MODULE = (
-    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner"
-)
-_MODEL_MODULE = (
-    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_models"
-)
-_ALGORITHM_MODULE = (
-    "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_ppo"
-)
+_RUNNER_MODULE = "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_runner"
+_MODEL_MODULE = "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_models"
+_ALGORITHM_MODULE = "robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.automatic_ppo"
 
 
 @configclass

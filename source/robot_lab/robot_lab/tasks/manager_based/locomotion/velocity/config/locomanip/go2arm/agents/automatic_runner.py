@@ -6,8 +6,8 @@ from __future__ import annotations
 import copy
 import os
 import re
-import time
 import statistics
+import time
 from collections import deque
 from types import SimpleNamespace
 
@@ -237,9 +237,7 @@ class RoboDuetAutomaticRunner:
         )
         self.arm_obs_history_scratch = torch.zeros_like(self.arm_obs_history)
         self.fake_arm_actions = torch.zeros(self.env.num_envs, self.arm_action_dim, device=self.device)
-        self.full_action = torch.zeros(
-            self.env.num_envs, self.dog_action_dim + self.arm_action_dim, device=self.device
-        )
+        self.full_action = torch.zeros(self.env.num_envs, self.dog_action_dim + self.arm_action_dim, device=self.device)
         self.arm_rewbuffer = deque(maxlen=100)
         self.cur_arm_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
@@ -301,8 +299,10 @@ class RoboDuetAutomaticRunner:
                 action_term = raw_env.action_manager.get_term("joint_pos")
             except KeyError:
                 action_term = None
-        if action_term is not None and hasattr(action_term, "cfg") and hasattr(
-            action_term.cfg, "fixed_delta_action_until_iteration"
+        if (
+            action_term is not None
+            and hasattr(action_term, "cfg")
+            and hasattr(action_term.cfg, "fixed_delta_action_until_iteration")
         ):
             action_term.cfg.fixed_delta_action_until_iteration = switch_iteration
         if hasattr(raw_env, "cfg") and hasattr(raw_env.cfg, "actions") and hasattr(raw_env.cfg.actions, "joint_pos"):
@@ -730,8 +730,12 @@ class RoboDuetAutomaticRunner:
         if isinstance(loaded_dict, dict) and "dog_model_state_dict" in loaded_dict:
             dog_state_dict = loaded_dict["dog_model_state_dict"]
             arm_state_dict = loaded_dict["arm_model_state_dict"]
-            dog_pre_missing, dog_pre_unexpected, dog_pre_shape = self._state_dict_precheck(dog_state_dict, self.dog_model)
-            arm_pre_missing, arm_pre_unexpected, arm_pre_shape = self._state_dict_precheck(arm_state_dict, self.arm_model)
+            dog_pre_missing, dog_pre_unexpected, dog_pre_shape = self._state_dict_precheck(
+                dog_state_dict, self.dog_model
+            )
+            arm_pre_missing, arm_pre_unexpected, arm_pre_shape = self._state_dict_precheck(
+                arm_state_dict, self.arm_model
+            )
             dog_load_result = self.dog_model.load_state_dict(dog_state_dict, strict=strict)
             arm_load_result = self.arm_model.load_state_dict(arm_state_dict, strict=strict)
             dog_missing, dog_unexpected = self._load_result_counts(dog_load_result)

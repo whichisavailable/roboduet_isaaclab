@@ -12,7 +12,6 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg import (
-    GO2ARM_ARM_JOINT_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
     resolve_go2arm_arm_joint_names,
 )
@@ -51,7 +50,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         arm_joint_names = resolve_go2arm_arm_joint_names(cfg)
         self._go2arm_arm_joint_ids, _ = self.scene["robot"].find_joints(arm_joint_names, preserve_order=True)
         self._go2arm_hold_joint_ids: tuple[int, ...] = ()
-        hold_joint_patterns = tuple(getattr(getattr(cfg.actions, "joint_pos", None), "hold_fixed_joint_names", ()) or ())
+        hold_joint_patterns = tuple(
+            getattr(getattr(cfg.actions, "joint_pos", None), "hold_fixed_joint_names", ()) or ()
+        )
         if hold_joint_patterns:
             hold_joint_ids = []
             for joint_id, joint_name in enumerate(self.scene["robot"].joint_names):
@@ -115,13 +116,13 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
     def _configure_roboduet_gravity_randomization(self, cfg) -> None:
         self._roboduet_randomize_gravity = bool(getattr(cfg, "roboduet_randomize_gravity", False))
         self._roboduet_nominal_gravity = tuple(float(value) for value in self.sim.cfg.gravity)
-        self._roboduet_gravity_range = tuple(float(value) for value in getattr(cfg, "roboduet_gravity_range", (-1.0, 1.0)))
+        self._roboduet_gravity_range = tuple(
+            float(value) for value in getattr(cfg, "roboduet_gravity_range", (-1.0, 1.0))
+        )
         interval_s = float(getattr(cfg, "roboduet_gravity_interval_s", 8.0))
         duration = float(getattr(cfg, "roboduet_gravity_impulse_duration", 0.99))
         self._roboduet_gravity_interval_steps = max(1, int(math.ceil(interval_s / self.step_dt)))
-        self._roboduet_gravity_duration_steps = max(
-            1, int(math.ceil(self._roboduet_gravity_interval_steps * duration))
-        )
+        self._roboduet_gravity_duration_steps = max(1, int(math.ceil(self._roboduet_gravity_interval_steps * duration)))
         if self._roboduet_randomize_gravity:
             self._randomize_roboduet_gravity()
 
@@ -163,7 +164,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         """镜像 upstream `env.plan(...)`，先缓存，再把 pitch/roll 规划动作写回命令项。"""
         if plan_actions.shape[-1] != self.num_plan_actions:
             raise ValueError(
-                f"Go2Arm RoboDuet expects {self.num_plan_actions} plan actions, but got shape {tuple(plan_actions.shape)}."
+                "Go2Arm RoboDuet expects "
+                f"{self.num_plan_actions} plan actions, but got shape "
+                f"{tuple(plan_actions.shape)}."
             )
         self.plan_actions.copy_(plan_actions * 0.4)
         self._command_term("roboduet").apply_plan_actions(plan_actions)
@@ -266,7 +269,11 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
             values = log_episode_sums[name][done_ids]
             if write_episode:
                 self._accumulate_tensor_mean_log(episode_dict, f"rew_{name}", values, write_episode=True)
-                if name == "total" and done_episode_lengths is not None and done_episode_lengths.numel() == done_ids.numel():
+                if (
+                    name == "total"
+                    and done_episode_lengths is not None
+                    and done_episode_lengths.numel() == done_ids.numel()
+                ):
                     safe_lengths = torch.clamp(done_episode_lengths.to(values.dtype), min=1.0)
                     self._accumulate_tensor_mean_log(
                         episode_dict,
@@ -331,7 +338,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         return current_iteration < float(fixed_until_iteration)
 
     def _keep_go2arm_arm_fixed(self) -> None:
-        fixed_joint_ids = tuple(int(joint_id) for joint_id in self._go2arm_arm_joint_ids) + tuple(self._go2arm_hold_joint_ids)
+        fixed_joint_ids = tuple(int(joint_id) for joint_id in self._go2arm_arm_joint_ids) + tuple(
+            self._go2arm_hold_joint_ids
+        )
         if len(fixed_joint_ids) == 0:
             return
         robot = self.scene["robot"]
@@ -533,9 +542,9 @@ class Go2ArmManagerBasedRLEnv(ManagerBasedRLEnv):
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.command_manager.compute(dt=self.step_dt)
-        motor_rand_ids = torch.where(
-            self.episode_length_buf % self._roboduet_motor_randomization_interval_steps == 0
-        )[0]
+        motor_rand_ids = torch.where(self.episode_length_buf % self._roboduet_motor_randomization_interval_steps == 0)[
+            0
+        ]
         self._randomize_roboduet_motor_props(motor_rand_ids)
         self._update_roboduet_gravity_randomization()
         self.reset_buf = self.termination_manager.compute()

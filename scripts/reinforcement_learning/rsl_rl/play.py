@@ -82,7 +82,10 @@ parser.add_argument(
     "--arm_fix",
     action="store_true",
     default=False,
-    help="When used with --stage1, hard-reset the arm to default posture every physics step like upstream keep_arm_fixed.",
+    help=(
+        "When used with --stage1, hard-reset the arm to default posture every "
+        "physics step like upstream keep_arm_fixed."
+    ),
 )
 parser.add_argument(
     "--go2arm_dog_cmd",
@@ -90,7 +93,10 @@ parser.add_argument(
     nargs="+",
     metavar="CMD",
     default=None,
-    help="Fixed RoboDuet dog command for Go2Arm play. Stage2 expects 3 values: vx vy wz. Stage1 expects 5 values: vx vy wz pitch roll.",
+    help=(
+        "Fixed RoboDuet dog command for Go2Arm play. Stage2 expects 3 values: "
+        "vx vy wz. Stage1 expects 5 values: vx vy wz pitch roll."
+    ),
 )
 parser.add_argument(
     "--go2arm_arm_cmd",
@@ -219,7 +225,9 @@ def _go2arm_effective_ee_pos_w(env, command_term, robot) -> torch.Tensor:
     return ee_pos_w + quat_apply(ee_quat_w, pos_offset_tensor.expand(ee_pos_w.shape[0], -1))
 
 
-def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs: dict[str, torch.Tensor] | None = None) -> None:
+def _print_go2arm_action_state(
+    env, policy_action: torch.Tensor, step: int, obs: dict[str, torch.Tensor] | None = None
+) -> None:
     """Print compact Go2Arm command-vs-execution diagnostics."""
     robot = env.unwrapped.scene["robot"]
     try:
@@ -243,19 +251,25 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
     roll_b, pitch_b = _go2arm_roll_pitch_from_quat(root_quat_w)
 
     dog_cmd = command_term.commands_dog[0].detach().cpu()
-    dog_real = torch.stack(
-        (
-            root_lin_vel_b[0, 0],
-            root_lin_vel_b[0, 1],
-            root_ang_vel_b[0, 2],
-            pitch_b[0],
-            roll_b[0],
+    dog_real = (
+        torch.stack(
+            (
+                root_lin_vel_b[0, 0],
+                root_lin_vel_b[0, 1],
+                root_ang_vel_b[0, 2],
+                pitch_b[0],
+                roll_b[0],
+            )
         )
-    ).detach().cpu()
+        .detach()
+        .cpu()
+    )
 
     arm_cmd_lpy = command_term.commands_arm_obs[0, :3]
     arm_cmd_xyz = command_term._arm_lpy_to_local_xyz(arm_cmd_lpy.unsqueeze(0)).squeeze(0)
-    arm_cmd_xy_zw = torch.stack((arm_cmd_xyz[0], arm_cmd_xyz[1], arm_cmd_xyz[2] + ground_height[0] + 0.38)).detach().cpu()
+    arm_cmd_xy_zw = (
+        torch.stack((arm_cmd_xyz[0], arm_cmd_xyz[1], arm_cmd_xyz[2] + ground_height[0] + 0.38)).detach().cpu()
+    )
     arm_real_xy_zw = torch.stack((ee_delta_yaw[0, 0], ee_delta_yaw[0, 1], ee_pos_w[0, 2])).detach().cpu()
 
     print(
@@ -269,8 +283,8 @@ def _print_go2arm_action_state(env, policy_action: torch.Tensor, step: int, obs:
         f"cmd(x_b,y_b,z_w)={_fmt_tensor(arm_cmd_xy_zw, 3)} "
         f"real(x_b,y_b,z_w)={_fmt_tensor(arm_real_xy_zw, 3)}"
     )
- 
- 
+
+
 def _sample_go2arm_dog_command_once(roboduet_cfg, *, include_body: bool = False) -> tuple[float, ...]:
     """Sample one non-zero dog command from the configured RoboDuet ranges."""
     ranges = [roboduet_cfg.lin_vel_x, roboduet_cfg.lin_vel_y, roboduet_cfg.ang_vel_yaw]
@@ -289,19 +303,19 @@ def _sample_go2arm_dog_command_once(roboduet_cfg, *, include_body: bool = False)
 def _sample_go2arm_arm_orientation_once(roboduet_cfg) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     """Sample one RoboDuet arm orientation command and return both RPY and ABG views."""
     roll = float(
-        torch.empty((), dtype=torch.float32).uniform_(
-            float(roboduet_cfg.roll_ee_range[0]), float(roboduet_cfg.roll_ee_range[1])
-        ).item()
+        torch.empty((), dtype=torch.float32)
+        .uniform_(float(roboduet_cfg.roll_ee_range[0]), float(roboduet_cfg.roll_ee_range[1]))
+        .item()
     )
     pitch = float(
-        torch.empty((), dtype=torch.float32).uniform_(
-            float(roboduet_cfg.pitch_ee_range[0]), float(roboduet_cfg.pitch_ee_range[1])
-        ).item()
+        torch.empty((), dtype=torch.float32)
+        .uniform_(float(roboduet_cfg.pitch_ee_range[0]), float(roboduet_cfg.pitch_ee_range[1]))
+        .item()
     )
     yaw = float(
-        torch.empty((), dtype=torch.float32).uniform_(
-            float(roboduet_cfg.yaw_ee_range[0]), float(roboduet_cfg.yaw_ee_range[1])
-        ).item()
+        torch.empty((), dtype=torch.float32)
+        .uniform_(float(roboduet_cfg.yaw_ee_range[0]), float(roboduet_cfg.yaw_ee_range[1]))
+        .item()
     )
     rpy = (roll, pitch, yaw)
     roll_tensor = torch.tensor([roll], dtype=torch.float32)
@@ -337,7 +351,8 @@ def _resolve_go2arm_fixed_dog_command(roboduet_cfg, *, stage1: bool) -> tuple[tu
     if len(dog_cmd) != expected_dims:
         stage_name = "stage1" if stage1 else "stage2"
         raise ValueError(
-            f"{stage_name} play expects --go2arm_dog_cmd to provide {expected_dims} values, got {len(dog_cmd)}: {dog_cmd}."
+            f"{stage_name} play expects --go2arm_dog_cmd to provide "
+            f"{expected_dims} values, got {len(dog_cmd)}: {dog_cmd}."
         )
     return dog_cmd, "cli"
 
@@ -446,7 +461,9 @@ def _configure_go2arm_fixed_arm_play_command(env_cfg) -> bool:
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+def main(  # noqa: C901 - CLI orchestration is intentionally kept inline for parity with upstream script flow.
+    env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg
+):
     """Play with RSL-RL agent."""
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
@@ -500,7 +517,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         fixed_arm_play = False
         if args_cli.go2arm_arm_cmd is not None:
             if args_cli.stage1:
-                print("[INFO] Go2Arm play override: ignoring --go2arm_arm_cmd because --stage1 keeps RoboDuet arm commands inactive.")
+                print(
+                    "[INFO] Go2Arm play override: ignoring --go2arm_arm_cmd "
+                    "because --stage1 keeps RoboDuet arm commands inactive."
+                )
             else:
                 fixed_arm_play = _configure_go2arm_fixed_arm_play_command(env_cfg)
         print("[INFO] Go2Arm play override: disabled RoboDuet eval-time DR/disturbances; reset randomization is kept.")
@@ -508,7 +528,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if fixed_roboduet_play:
             print("[INFO] Go2Arm play override: fixed one dog command and disabled play-time dog-command resampling.")
         if fixed_arm_play:
-            print("[INFO] Go2Arm play override: fixed RoboDuet arm position command; planner body pitch/roll still comes from the arm policy.")
+            print(
+                "[INFO] Go2Arm play override: fixed RoboDuet arm position "
+                "command; planner body pitch/roll still comes from the arm policy."
+            )
     else:
         if env_cfg.observations.policy is not None:
             env_cfg.observations.policy.enable_corruption = False
@@ -538,9 +561,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ee_yaw_b,
                 ee_yaw_b,
             )
-        print(
-            f"[INFO] Go2Arm fixed ee command override: pos={args_cli.go2arm_ee_pos}, rpy={args_cli.go2arm_ee_rpy}"
-        )
+        print(f"[INFO] Go2Arm fixed ee command override: pos={args_cli.go2arm_ee_pos}, rpy={args_cli.go2arm_ee_rpy}")
         env_cfg.commands.ee_pose.sample_z_in_world_frame = True
         env_cfg.commands.ee_pose.reject_position_cuboid = None
         env_cfg.commands.ee_pose.max_sampling_tries = 1
@@ -561,7 +582,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         }
 
     if "go2arm" in task_name.lower() and args_cli.keyboard:
-        raise ValueError("Go2Arm/RoboDuet does not support generic `play.py --keyboard`; use the task-specific control path.")
+        raise ValueError(
+            "Go2Arm/RoboDuet does not support generic `play.py --keyboard`; use the task-specific control path."
+        )
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1
@@ -673,7 +696,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 这样可以确保 go2arm 这类自定义 privileged teacher policy 走正确的导出语义。
     export_model_dir = os.path.join(log_dir, "exported")
     if getattr(policy_nn, "skip_generic_export", False):
-        print("[INFO] Skipping generic play-time export for RoboDuet automatic policy. Use training-time deploy_model artifacts instead.")
+        print(
+            "[INFO] Skipping generic play-time export for RoboDuet automatic "
+            "policy. Use training-time deploy_model artifacts instead."
+        )
     elif policy_nn is not None and hasattr(policy_nn, "as_jit") and hasattr(policy_nn, "as_onnx"):
         os.makedirs(export_model_dir, exist_ok=True)
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -9,10 +12,8 @@ import time
 from collections import deque
 
 import git
-import torch
-
 import rsl_rl
-
+import torch
 
 _LOSS_LABELS = {
     "value_function": "Value function",
@@ -204,7 +205,7 @@ class Logger:
         run_name = self.cfg.get("run_name")
         log_string += f"""\033[1m{"run_name:":>{pad}} {run_name}\033[0m \n""" if run_name else ""
         log_string += (
-            f"""{'Computation:':>{pad}} {fps:.0f} steps/s """
+            f"""{"Computation:":>{pad}} {fps:.0f} steps/s """
             f"""(collection: {collect_time:.3f}s, learning: {learn_time:.3f}s)\n"""
         )
         if policy_std_dict is not None:

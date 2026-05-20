@@ -367,8 +367,12 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
         self._roboduet_global_joint_ids = torch.as_tensor(self._joint_ids, dtype=torch.long, device=self.device)
         self._arm_joint_names = resolve_go2arm_arm_joint_names(getattr(env, "cfg", None))
 
-        leg_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_LEG_JOINT_NAMES]
-        arm_action_ids = [idx for idx, joint_name in enumerate(self._joint_names) if joint_name in self._arm_joint_names]
+        leg_action_ids = [
+            idx for idx, joint_name in enumerate(self._joint_names) if joint_name in GO2ARM_LEG_JOINT_NAMES
+        ]
+        arm_action_ids = [
+            idx for idx, joint_name in enumerate(self._joint_names) if joint_name in self._arm_joint_names
+        ]
         self._leg_action_ids = torch.tensor(leg_action_ids, dtype=torch.long, device=self.device)
         self._arm_action_ids = torch.tensor(arm_action_ids, dtype=torch.long, device=self.device)
         self._leg_joint_ids = self._roboduet_global_joint_ids[self._leg_action_ids]
@@ -480,7 +484,9 @@ class Go2ArmDefaultDeltaJointPositionAction(joint_actions.JointPositionAction):
     def apply_actions(self):
         leg_pos = self._asset.data.joint_pos[:, self._leg_joint_ids]
         leg_vel = self._asset.data.joint_vel[:, self._leg_joint_ids]
-        leg_torque = self._leg_kp * (self._leg_position_target - leg_pos + self._leg_motor_offsets) - self._leg_kd * leg_vel
+        leg_torque = (
+            self._leg_kp * (self._leg_position_target - leg_pos + self._leg_motor_offsets) - self._leg_kd * leg_vel
+        )
         leg_torque = leg_torque * self._leg_motor_strengths
         leg_effort_limits = self._asset.data.joint_effort_limits[:, self._leg_joint_ids]
         leg_torque = torch.clamp(leg_torque, min=-leg_effort_limits, max=leg_effort_limits)

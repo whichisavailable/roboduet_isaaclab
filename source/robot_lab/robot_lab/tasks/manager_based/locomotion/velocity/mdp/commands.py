@@ -878,7 +878,7 @@ class RoboDuetCommandCfg(CommandTermCfg):
     fixed_play_arm_orientation_rpy_b: tuple[float, float, float] | None = None
     disable_play_resampling: bool = False
     disable_play_arm_resampling: bool = False
- 
+
     def __post_init__(self):
         self.class_type = RoboDuetCommand
         self.resampling_time_range = (self.resampling_time_s, self.resampling_time_s)
@@ -934,8 +934,12 @@ class RoboDuetCommand(CommandTerm):
         )
         self._curriculum.set_to(low=low, high=high)
         self.env_command_bins = np.zeros(self.num_envs, dtype=np.int64)
-        self.arm_collision_lower_limits = torch.tensor(cfg.arm_collision_lower_limits, device=self.device, dtype=torch.float32)
-        self.arm_collision_upper_limits = torch.tensor(cfg.arm_collision_upper_limits, device=self.device, dtype=torch.float32)
+        self.arm_collision_lower_limits = torch.tensor(
+            cfg.arm_collision_lower_limits, device=self.device, dtype=torch.float32
+        )
+        self.arm_collision_upper_limits = torch.tensor(
+            cfg.arm_collision_upper_limits, device=self.device, dtype=torch.float32
+        )
         self.arm_underground_limit: float = cfg.arm_underground_limit
 
     @property
@@ -976,7 +980,7 @@ class RoboDuetCommand(CommandTerm):
     def accumulate_metric(self, name: str, values: torch.Tensor) -> None:
         if name in self.command_sums:
             self.command_sums[name] += values.detach()
- 
+
     def _apply_fixed_play_locomotion_commands(self, env_ids: torch.Tensor) -> bool:
         fixed_command = self.cfg.fixed_play_dog_command
         if fixed_command is None:
@@ -994,7 +998,7 @@ class RoboDuetCommand(CommandTerm):
             # velocity terms were provided, keep the body-command channels inactive.
             self.commands_dog[env_ids, 3:5] = 0.0
         return True
- 
+
     def _refresh_command_buffer(self) -> None:
         torch.mul(self.commands_dog[:, :3], self.commands_scale_dog[:, :3], out=self.command_buffer[:, :3])
         if self.switch_open:
@@ -1002,7 +1006,7 @@ class RoboDuetCommand(CommandTerm):
         else:
             self.command_buffer[:, 3:9].copy_(self._zero_arm_command_obs)
         self.command_buffer[:, 9:13].copy_(self.clock_inputs)
- 
+
     def _resample_command(self, env_ids: Sequence[int]):
         self._resample_locomotion_commands(torch.as_tensor(env_ids, dtype=torch.long, device=self.device))
 
@@ -1058,7 +1062,9 @@ class RoboDuetCommand(CommandTerm):
                     continue
                 task_rewards.append(self.command_sums[key][env_ids] / ep_len)
                 success_thresholds.append(
-                    self.cfg.curriculum_thresholds[key] * self.cfg.pretrained_reward_scales[key] * float(self._env.step_dt)
+                    self.cfg.curriculum_thresholds[key]
+                    * self.cfg.pretrained_reward_scales[key]
+                    * float(self._env.step_dt)
                 )
             self._curriculum.update(
                 old_bins,
@@ -1086,7 +1092,9 @@ class RoboDuetCommand(CommandTerm):
     def apply_plan_actions(self, plan_actions: torch.Tensor) -> None:
         """应用 `auto_train` 机械臂 policy 额外输出的 2 维 body pitch/roll 规划动作。"""
         if plan_actions.shape[-1] < 2:
-            raise ValueError(f"RoboDuet plan actions expect at least 2 dims, but got shape {tuple(plan_actions.shape)}.")
+            raise ValueError(
+                f"RoboDuet plan actions expect at least 2 dims, but got shape {tuple(plan_actions.shape)}."
+            )
         rescaled_actions = plan_actions[..., :2] * 0.4
         self.commands_dog[:, 3] = torch.clamp(
             rescaled_actions[:, 0],
@@ -1100,15 +1108,17 @@ class RoboDuetCommand(CommandTerm):
         )
 
     def _arm_lpy_to_local_xyz(self, lpy: torch.Tensor) -> torch.Tensor:
-        l, p, y = lpy[:, 0], lpy[:, 1], lpy[:, 2]
-        x = l * torch.cos(p) * torch.cos(y)
-        y_coord = l * torch.cos(p) * torch.sin(y)
-        z = l * torch.sin(p)
+        arm_length, pitch, yaw = lpy[:, 0], lpy[:, 1], lpy[:, 2]
+        x = arm_length * torch.cos(pitch) * torch.cos(yaw)
+        y_coord = arm_length * torch.cos(pitch) * torch.sin(yaw)
+        z = arm_length * torch.sin(pitch)
         return torch.stack([x, y_coord, z], dim=-1)
 
     def _arm_target_collision_mask(self, lpy: torch.Tensor) -> torch.Tensor:
         xyz = self._arm_lpy_to_local_xyz(lpy)
-        in_box = torch.all(xyz < self.arm_collision_upper_limits, dim=-1) & torch.all(xyz > self.arm_collision_lower_limits, dim=-1)
+        in_box = torch.all(xyz < self.arm_collision_upper_limits, dim=-1) & torch.all(
+            xyz > self.arm_collision_lower_limits, dim=-1
+        )
         underground = xyz[:, 2] < self.arm_underground_limit
         return in_box | underground
 
@@ -1137,9 +1147,15 @@ class RoboDuetCommand(CommandTerm):
             bad = self._arm_target_collision_mask(self.commands_arm[remaining])
             remaining = remaining[bad]
             if remaining.numel() > 0:
-                self.commands_arm[remaining, 0] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.l_range)
-                self.commands_arm[remaining, 1] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.p_range)
-                self.commands_arm[remaining, 2] = torch.empty(remaining.numel(), device=self.device).uniform_(*self.cfg.y_range)
+                self.commands_arm[remaining, 0] = torch.empty(remaining.numel(), device=self.device).uniform_(
+                    *self.cfg.l_range
+                )
+                self.commands_arm[remaining, 1] = torch.empty(remaining.numel(), device=self.device).uniform_(
+                    *self.cfg.p_range
+                )
+                self.commands_arm[remaining, 2] = torch.empty(remaining.numel(), device=self.device).uniform_(
+                    *self.cfg.y_range
+                )
 
     def _resample_arm_commands(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -1150,10 +1166,7 @@ class RoboDuetCommand(CommandTerm):
         if fixed_orientation_rpy is not None:
             fixed_orientation_rpy_tensor = torch.tensor(fixed_orientation_rpy, device=self.device, dtype=torch.float32)
             if fixed_orientation_rpy_tensor.numel() != 3:
-                raise ValueError(
-                    "fixed_play_arm_orientation_rpy_b expects 3 values, "
-                    f"got {fixed_orientation_rpy}."
-                )
+                raise ValueError(f"fixed_play_arm_orientation_rpy_b expects 3 values, got {fixed_orientation_rpy}.")
             roll = fixed_orientation_rpy_tensor[0].expand(env_ids.numel())
             pitch = fixed_orientation_rpy_tensor[1].expand(env_ids.numel())
             yaw = fixed_orientation_rpy_tensor[2].expand(env_ids.numel())
@@ -1219,7 +1232,9 @@ class RoboDuetCommand(CommandTerm):
         if self._runtime_foot_order_logged:
             return
         try:
-            robot_foot_body_ids, robot_foot_body_names = self.robot.find_bodies(GO2ARM_FOOT_BODY_NAMES, preserve_order=True)
+            robot_foot_body_ids, robot_foot_body_names = self.robot.find_bodies(
+                GO2ARM_FOOT_BODY_NAMES, preserve_order=True
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[ROBODUET FOOT ORDER] unable to resolve robot foot order at runtime: {type(exc).__name__}: {exc}")
             self._runtime_foot_order_logged = True

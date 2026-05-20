@@ -158,10 +158,7 @@ UNITREE_Go2Arm_ROBODUET_GO2PIPER_CFG = ArticulationCfg(
         fix_base=False,
         merge_fixed_joints=True,
         replace_cylinders_with_capsules=True,
-        asset_path=(
-            f"{ISAACLAB_ASSETS_DATA_DIR}/Robots/unitree/roboduet_go2piper/go2/urdf/"
-            "go2piper.urdf"
-        ),
+        asset_path=(f"{ISAACLAB_ASSETS_DATA_DIR}/Robots/unitree/roboduet_go2piper/go2/urdf/go2piper.urdf"),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

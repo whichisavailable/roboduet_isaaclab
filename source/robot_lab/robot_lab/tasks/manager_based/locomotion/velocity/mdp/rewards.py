@@ -14,7 +14,7 @@ from isaaclab.envs import mdp
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensor, RayCaster
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
+from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -26,9 +26,9 @@ from .observations import (
     GO2ARM_FOOT_SPHERE_RADIUS,
     _get_go2arm_foot_kinematics,
     _get_go2arm_ground_height_data,
+    _go2arm_phase_offsets,
     _quat_to_abg,
     _quat_to_roll_pitch,
-    _go2arm_phase_offsets,
     get_go2arm_precise_foot_contact_forces,
     get_go2arm_precise_foot_contact_timers,
     get_go2arm_precise_foot_normal_forces,
@@ -111,8 +111,7 @@ def _ensure_roboduet_logging_buffers(
     if getattr(env, "_roboduet_command_term_names", None) != expected_command_names:
         env._roboduet_command_term_names = expected_command_names
         env._roboduet_command_sums = {
-            name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-            for name in expected_command_names
+            name: torch.zeros(env.num_envs, dtype=torch.float32, device=env.device) for name in expected_command_names
         }
     return env._roboduet_command_sums
 
@@ -1663,47 +1662,6 @@ def _compute_go2arm_reward_terms(
 
     mani_regularization = torch.exp(-mani_regularization_raw)
 
-    # manipulation 各惩罚项对应到 mani_regularization_raw 的实际加权贡献。
-    support_roll_weighted = abs(params["mani_regularization_support_roll_weight"]) * (
-        support_roll / params["mani_regularization_support_roll_std"]
-    )
-    support_feet_slide_weighted = abs(params["mani_regularization_support_feet_slide_weight"]) * (
-        support_feet_slide / params["mani_regularization_support_feet_slide_std"]
-    )
-    support_foot_air_weighted = abs(params["mani_regularization_support_foot_air_weight"]) * torch.clamp(
-        support_foot_air,
-        min=0.0,
-        max=params["mani_regularization_support_foot_air_clip_max"],
-    )
-    support_non_foot_contact_weighted = abs(
-        params["mani_regularization_support_non_foot_contact_weight"]
-    ) * torch.clamp(
-        support_non_foot_contact,
-        min=0.0,
-        max=params["mani_regularization_support_non_foot_contact_clip_max"],
-    )
-    target_height_pitch_weighted = abs(params["mani_regularization_target_height_pitch_weight"]) * (
-        target_height_pitch / params["mani_regularization_target_height_pitch_std"]
-    )
-    min_base_height_weighted = abs(params["mani_regularization_min_base_height_weight"]) * (
-        min_base_height / params["mani_regularization_min_base_height_std"]
-    )
-    posture_deviation_weighted = abs(params["mani_regularization_posture_deviation_weight"]) * (
-        posture_deviation / params["mani_regularization_posture_deviation_std"]
-    )
-    joint_limit_safety_weighted = abs(params["mani_regularization_joint_limit_safety_weight"]) * (
-        joint_limit_safety / params["mani_regularization_joint_limit_safety_std"]
-    )
-    support_left_right_x_symmetry_weighted = abs(params["mani_regularization_support_left_right_x_symmetry_weight"]) * (
-        support_left_right_x_symmetry / params["mani_regularization_support_left_right_x_symmetry_std"]
-    )
-    support_left_right_y_symmetry_weighted = abs(params["mani_regularization_support_left_right_y_symmetry_weight"]) * (
-        support_left_right_y_symmetry / params["mani_regularization_support_left_right_y_symmetry_std"]
-    )
-    support_foot_xy_range_weighted = abs(params["mani_regularization_support_foot_xy_range_weight"]) * (
-        support_foot_xy_range / params["mani_regularization_support_foot_xy_range_std"]
-    )
-
     # -----------------------------
     # 5) potential：保持你现在的状态项接法不变
     # -----------------------------
@@ -2227,6 +2185,7 @@ def total_reward(
     )
     cache = _compute_go2arm_reward_terms(env)
     return cache["total_reward_debug"]
+
 
 def track_lin_vel_xy_exp(
     env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
@@ -2959,7 +2918,7 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     return reward
 
 
-def _compute_roboduet_reward_state(
+def _compute_roboduet_reward_state(  # noqa: C901 - reward assembly is intentionally centralized for config parity.
     env: ManagerBasedRLEnv,
     command_name: str,
     pretrained_scales: dict[str, float],
@@ -3078,10 +3037,14 @@ def _compute_roboduet_reward_state(
     if has_active("orientation_control"):
         projected_gravity_b = roboduet_projected_gravity_b(robot)
         quat_roll = quat_from_euler_xyz(
-            -term.commands_dog[:, 4], torch.zeros_like(term.commands_dog[:, 4]), torch.zeros_like(term.commands_dog[:, 4])
+            -term.commands_dog[:, 4],
+            torch.zeros_like(term.commands_dog[:, 4]),
+            torch.zeros_like(term.commands_dog[:, 4]),
         )
         quat_pitch = quat_from_euler_xyz(
-            torch.zeros_like(term.commands_dog[:, 3]), -term.commands_dog[:, 3], torch.zeros_like(term.commands_dog[:, 3])
+            torch.zeros_like(term.commands_dog[:, 3]),
+            -term.commands_dog[:, 3],
+            torch.zeros_like(term.commands_dog[:, 3]),
         )
         desired_base_quat = quat_mul(quat_roll, quat_pitch)
         desired_projected_gravity = quat_apply_inverse(
@@ -3135,17 +3098,24 @@ def _compute_roboduet_reward_state(
             )
 
         if has_active("tracking_contacts_shaped_force"):
-            metrics["tracking_contacts_shaped_force"] = -torch.sum(
-                (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_force_norms) / gait_force_sigma)),
-                dim=1,
-            ) / 4.0
+            metrics["tracking_contacts_shaped_force"] = (
+                -torch.sum(
+                    (1.0 - desired_contact) * (1.0 - torch.exp(-torch.square(foot_force_norms) / gait_force_sigma)),
+                    dim=1,
+                )
+                / 4.0
+            )
 
         if has_active("tracking_contacts_shaped_vel"):
             foot_velocities = get_foot_body_lin_vel_w()
-            metrics["tracking_contacts_shaped_vel"] = -torch.sum(
-                desired_contact * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
-                dim=1,
-            ) / 4.0
+            metrics["tracking_contacts_shaped_vel"] = (
+                -torch.sum(
+                    desired_contact
+                    * (1.0 - torch.exp(-torch.sum(torch.square(foot_velocities), dim=2) / gait_vel_sigma)),
+                    dim=1,
+                )
+                / 4.0
+            )
 
     if has_active("collision"):
         illegal_sensor = env.scene.sensors[illegal_contact_sensor_cfg.name]
@@ -3165,7 +3135,9 @@ def _compute_roboduet_reward_state(
 
     arm_manip_tracking_pos_reward = zero_reward
     arm_manip_tracking_ori_reward = zero_reward
-    if has_active("arm_manip_commands_tracking_combine", "vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"):
+    if has_active(
+        "arm_manip_commands_tracking_combine", "vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"
+    ):
         current_lpy = roboduet_current_lpy(env, ee_body_cfg)
         current_abg = _quat_to_abg(roboduet_current_ee_quat_in_base(env, ee_body_cfg))
         lpy_range = _cached_row_tensor(
@@ -3218,7 +3190,9 @@ def _compute_roboduet_reward_state(
         if prev_joint_vel_buffer is None or prev_joint_vel_buffer.shape != robot.data.joint_vel.shape:
             prev_joint_vel_buffer = torch.zeros_like(robot.data.joint_vel)
             env._roboduet_prev_joint_vel = prev_joint_vel_buffer
-    prev_joint_vel = prev_joint_vel_buffer if prev_joint_vel_buffer is not None else torch.zeros_like(robot.data.joint_vel)
+    prev_joint_vel = (
+        prev_joint_vel_buffer if prev_joint_vel_buffer is not None else torch.zeros_like(robot.data.joint_vel)
+    )
 
     if has_active("arm_dof_vel"):
         metrics["arm_dof_vel"] = torch.sum(torch.square(robot.data.joint_vel[:, arm_joint_cfg.joint_ids]), dim=1)
@@ -3245,7 +3219,8 @@ def _compute_roboduet_reward_state(
     if has_active("arm_dof_acc"):
         metrics["arm_dof_acc"] = torch.sum(
             torch.square(
-                (prev_joint_vel[:, arm_joint_cfg.joint_ids] - robot.data.joint_vel[:, arm_joint_cfg.joint_ids]) / env.step_dt
+                (prev_joint_vel[:, arm_joint_cfg.joint_ids] - robot.data.joint_vel[:, arm_joint_cfg.joint_ids])
+                / env.step_dt
             ),
             dim=1,
         )
@@ -3263,7 +3238,9 @@ def _compute_roboduet_reward_state(
         action, prev_action, prev_prev_action = _effective_action_history(env)
 
     if has_active("arm_action_rate"):
-        metrics["arm_action_rate"] = torch.sum(torch.square(prev_action[:, arm_action_ids] - action[:, arm_action_ids]), dim=1)
+        metrics["arm_action_rate"] = torch.sum(
+            torch.square(prev_action[:, arm_action_ids] - action[:, arm_action_ids]), dim=1
+        )
 
     plan_actions = last_plan_actions = None
     if has_active("arm_control_limits", "arm_control_smoothness_1"):
@@ -3295,7 +3272,8 @@ def _compute_roboduet_reward_state(
     if has_active("dof_acc"):
         metrics["dof_acc"] = torch.sum(
             torch.square(
-                (prev_joint_vel[:, leg_joint_cfg.joint_ids] - robot.data.joint_vel[:, leg_joint_cfg.joint_ids]) / env.step_dt
+                (prev_joint_vel[:, leg_joint_cfg.joint_ids] - robot.data.joint_vel[:, leg_joint_cfg.joint_ids])
+                / env.step_dt
             ),
             dim=1,
         )
@@ -3322,7 +3300,8 @@ def _compute_roboduet_reward_state(
         arm_valid_2 = (prev_prev_action[:, arm_action_ids] != 0.0).float()
         if has_active("action_smoothness_1"):
             metrics["action_smoothness_1"] = torch.sum(
-                torch.square(joint_pos_target[:, leg_action_ids] - last_joint_pos_target[:, leg_action_ids]) * leg_valid,
+                torch.square(joint_pos_target[:, leg_action_ids] - last_joint_pos_target[:, leg_action_ids])
+                * leg_valid,
                 dim=1,
             )
         if has_active("action_smoothness_2"):
@@ -3338,7 +3317,8 @@ def _compute_roboduet_reward_state(
             )
         if has_active("arm_action_smoothness_1"):
             metrics["arm_action_smoothness_1"] = torch.sum(
-                torch.square(joint_pos_target[:, arm_action_ids] - last_joint_pos_target[:, arm_action_ids]) * arm_valid,
+                torch.square(joint_pos_target[:, arm_action_ids] - last_joint_pos_target[:, arm_action_ids])
+                * arm_valid,
                 dim=1,
             )
         if has_active("arm_action_smoothness_2"):
@@ -3474,8 +3454,8 @@ def _compute_roboduet_reward_state(
             (tracking_lin_vel_reward + torch.pow(tracking_lin_vel_reward, 5.0)) * tracking_lin_vel_weight
             + (tracking_ang_vel_reward + torch.pow(tracking_ang_vel_reward, 5.0)) * tracking_ang_vel_weight
         ) * reward_dt
-        reward_dog_scaled = 0.4 * (reward_dt + reward_pos_dog_omni_scaled) * torch.exp(
-            reward_neg_dog_scaled / float(sigma_rew_neg)
+        reward_dog_scaled = (
+            0.4 * (reward_dt + reward_pos_dog_omni_scaled) * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))
         )
         reward_arm_scaled = reward_pos_arm_scaled * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
     elif only_positive_rewards_ji22_style and roboduet_stage2_omni_reward and term.switch_open:
@@ -3484,21 +3464,20 @@ def _compute_roboduet_reward_state(
         arm_manip_weight = float(hybrid_scales.get("arm_manip_commands_tracking_combine", 0.0))
         tracking_lin_vel_reward = metrics.get("tracking_lin_vel", zero_reward)
         tracking_ang_vel_reward = metrics.get("tracking_ang_vel", zero_reward)
-        arm_manip_tracking_reward = (
-            enhance_exponential_tracking_reward(arm_manip_tracking_pos_reward)
-            + arm_manip_tracking_pos_reward * enhance_exponential_tracking_reward(arm_manip_tracking_ori_reward)
-        )
+        arm_manip_tracking_reward = enhance_exponential_tracking_reward(
+            arm_manip_tracking_pos_reward
+        ) + arm_manip_tracking_pos_reward * enhance_exponential_tracking_reward(arm_manip_tracking_ori_reward)
         reward_pos_dog_omni_scaled = (
             enhance_exponential_tracking_reward(tracking_lin_vel_reward) * tracking_lin_vel_weight
             + enhance_exponential_tracking_reward(tracking_ang_vel_reward) * tracking_ang_vel_weight
             + arm_manip_tracking_reward * arm_manip_weight
         ) * reward_dt
         reward_pos_arm_omni_scaled = arm_manip_tracking_reward * arm_manip_weight * reward_dt
-        reward_dog_scaled = 0.3 * (reward_dt + reward_pos_dog_omni_scaled) * torch.exp(
-            reward_neg_dog_scaled / float(sigma_rew_neg)
+        reward_dog_scaled = (
+            0.3 * (reward_dt + reward_pos_dog_omni_scaled) * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))
         )
-        reward_arm_scaled = 0.3 * (reward_dt + reward_pos_arm_omni_scaled) * torch.exp(
-            reward_neg_arm_scaled / float(sigma_rew_neg)
+        reward_arm_scaled = (
+            0.3 * (reward_dt + reward_pos_arm_omni_scaled) * torch.exp(reward_neg_arm_scaled / float(sigma_rew_neg))
         )
     elif only_positive_rewards_ji22_style:
         reward_dog_scaled = reward_pos_dog_scaled * torch.exp(reward_neg_dog_scaled / float(sigma_rew_neg))

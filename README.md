@@ -566,7 +566,7 @@ arm manipulation：
 
 stage1 下只对 dog reward 的正项聚合做增强，核心是把 tracking reward 从 `r` 改成 `r + r^5`：
 
-`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`  
+`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`
 `r_yaw = exp(-(cmd_yaw - wz_body)^2 / 0.25)`
 
 `R_pos,dog^omni = [1.0 * (r_lin + r_lin^5) + 0.5 * (r_yaw + r_yaw^5)] * dt`
@@ -588,7 +588,7 @@ stage2 omni 不只是增强 locomotion tracking，还把 manipulation 正项显�
 
 先定义：
 
-`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`  
+`r_lin = exp(-||cmd_xy - v_xy_body||^2 / 0.25)`
 `r_yaw = exp(-(cmd_yaw - wz_body)^2 / 0.25)`
 
 机械臂跟踪部分先计算归一化误差：
@@ -607,18 +607,18 @@ stage2 中 manipulation 权重不是常数，而是在进入 stage2 后的前 `5
 
 但在 omni 聚合里，用的是更强的形式：
 
-`r_pos = exp(-w_lpy * e_lpy)`  
-`r_ori = exp(-w_rpy * e_rpy)`  
+`r_pos = exp(-w_lpy * e_lpy)`
+`r_ori = exp(-w_rpy * e_rpy)`
 `r_manip^omni = (r_pos + r_pos^5) + r_pos * (r_ori + r_ori^5)`
 
 于是：
 
-`R_pos,dog^omni = [0.7 * (r_lin + r_lin^5) + 0.25 * (r_yaw + r_yaw^5) + 1.0 * r_manip^omni] * dt`  
+`R_pos,dog^omni = [0.7 * (r_lin + r_lin^5) + 0.25 * (r_yaw + r_yaw^5) + 1.0 * r_manip^omni] * dt`
 `R_pos,arm^omni = [1.0 * r_manip^omni] * dt`
 
 最终：
 
-`R_dog = 0.3 * (dt + R_pos,dog^omni) * exp(R_neg,dog / 0.05)`  
+`R_dog = 0.3 * (dt + R_pos,dog^omni) * exp(R_neg,dog / 0.05)`
 `R_arm = 0.3 * (dt + R_pos,arm^omni) * exp(R_neg,arm / 0.05)`
 
 stage2 omni 的关键点是：
@@ -630,7 +630,7 @@ stage2 omni 的关键点是：
 
 ### Terminations
 
-当前 RoboDuet 对齐配置下，真正启用的 termination 很少。  
+当前 RoboDuet 对齐配置下，真正启用的 termination 很少。
 严格来说，活跃的终止项只有：
 
 - stage1：`time_out` + `base_height_termination`
@@ -673,7 +673,7 @@ stage2 omni 的关键点是：
 
 `delta_z = l * sin(p) + 0.38 - z_base`
 
-其中 `l, p` 来自当前 arm 的 `lpy` 位置命令。  
+其中 `l, p` 来自当前 arm 的 `lpy` 位置命令。
 然后只有在轨迹已经走到后半段时才可能终止：
 
 `arm_time / T_traj > 0.6`

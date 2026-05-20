@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import torch
-
 from rsl_rl.utils import split_and_pad_trajectories
 
 
@@ -61,12 +60,8 @@ class AutomaticRolloutStorage:
         self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.mu = torch.zeros(
-            num_transitions_per_env, num_envs, *actions_distribution_shape, device=self.device
-        )
-        self.sigma = torch.zeros(
-            num_transitions_per_env, num_envs, *actions_distribution_shape, device=self.device
-        )
+        self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_distribution_shape, device=self.device)
+        self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_distribution_shape, device=self.device)
         self.env_bins = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
 
         self.num_transitions_per_env = num_transitions_per_env

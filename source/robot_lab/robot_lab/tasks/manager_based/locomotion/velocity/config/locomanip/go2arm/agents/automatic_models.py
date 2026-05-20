@@ -71,7 +71,10 @@ class DogActorCritic(nn.Module):
         )
         act = _activation(activation)
 
-        adaptation_layers: list[nn.Module] = [nn.Linear(self.num_obs_history, adaptation_module_branch_hidden_dims[0]), act]
+        adaptation_layers: list[nn.Module] = [
+            nn.Linear(self.num_obs_history, adaptation_module_branch_hidden_dims[0]),
+            act,
+        ]
         for idx, hidden_dim in enumerate(adaptation_module_branch_hidden_dims):
             if idx == len(adaptation_module_branch_hidden_dims) - 1:
                 adaptation_layers.append(nn.Linear(hidden_dim, self.num_privileged_obs))
@@ -80,7 +83,10 @@ class DogActorCritic(nn.Module):
                 adaptation_layers.append(act)
         self.adaptation_module = nn.Sequential(*adaptation_layers)
 
-        actor_layers: list[nn.Module] = [nn.Linear(self.num_privileged_obs + self.num_obs_history, actor_hidden_dims[0]), act]
+        actor_layers: list[nn.Module] = [
+            nn.Linear(self.num_privileged_obs + self.num_obs_history, actor_hidden_dims[0]),
+            act,
+        ]
         for idx, hidden_dim in enumerate(actor_hidden_dims):
             if idx == len(actor_hidden_dims) - 1:
                 actor_layers.append(nn.Linear(hidden_dim, num_actions))
@@ -89,7 +95,10 @@ class DogActorCritic(nn.Module):
                 actor_layers.append(act)
         self.actor_body = nn.Sequential(*actor_layers)
 
-        critic_layers: list[nn.Module] = [nn.Linear(self.num_privileged_obs + self.num_obs_history, critic_hidden_dims[0]), act]
+        critic_layers: list[nn.Module] = [
+            nn.Linear(self.num_privileged_obs + self.num_obs_history, critic_hidden_dims[0]),
+            act,
+        ]
         for idx, hidden_dim in enumerate(critic_hidden_dims):
             if idx == len(critic_hidden_dims) - 1:
                 critic_layers.append(nn.Linear(hidden_dim, 1))
@@ -212,7 +221,10 @@ class ArmActorCritic(nn.Module):
         )
         act = _activation(activation)
 
-        adaptation_layers: list[nn.Module] = [nn.Linear(self.num_obs_history, adaptation_module_branch_hidden_dims[0]), act]
+        adaptation_layers: list[nn.Module] = [
+            nn.Linear(self.num_obs_history, adaptation_module_branch_hidden_dims[0]),
+            act,
+        ]
         for idx, hidden_dim in enumerate(adaptation_module_branch_hidden_dims):
             if idx == len(adaptation_module_branch_hidden_dims) - 1:
                 adaptation_layers.append(nn.Linear(hidden_dim, self.num_privileged_obs))

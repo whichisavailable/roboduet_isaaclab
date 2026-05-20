@@ -346,7 +346,8 @@ def _unlock_roboduet_command_curriculum(env) -> None:
     active_bins = int((weights > 0.0).sum())
     print(
         "[INFO] RoboDuet resume command curriculum unlocked: "
-        f"active_bins={active_bins}/{len(weights)}, weight_min={float(weights.min()):g}, weight_max={float(weights.max()):g}."
+        f"active_bins={active_bins}/{len(weights)}, "
+        f"weight_min={float(weights.min()):g}, weight_max={float(weights.max()):g}."
     )
 
 
@@ -528,7 +529,9 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
         joint_name for joint_name in all_joint_names if joint_name in stage1_frozen_joint_name_set
     )
     missing_stage1_frozen_non_leg_joint_names = tuple(
-        joint_name for joint_name in expected_stage1_frozen_joint_names if joint_name not in stage1_frozen_joint_name_set
+        joint_name
+        for joint_name in expected_stage1_frozen_joint_names
+        if joint_name not in stage1_frozen_joint_name_set
     )
     unexpected_stage1_frozen_joint_names = tuple(
         joint_name for joint_name in stage1_frozen_joint_names if joint_name not in expected_stage1_frozen_joint_names
@@ -559,7 +562,9 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
         max(getattr(command_term.cfg, "steps_per_iteration", 1), 1)
     )
     add_check("command_switch_iteration", int(command_term.cfg.switch_iteration), expected_switch_iteration)
-    expected_action_fixed_until_iteration = 0 if current_iteration >= float(expected_switch_iteration) else expected_switch_iteration
+    expected_action_fixed_until_iteration = (
+        0 if current_iteration >= float(expected_switch_iteration) else expected_switch_iteration
+    )
     add_check(
         "action_fixed_until_iteration",
         int(action_term.cfg.fixed_delta_action_until_iteration),
@@ -634,7 +639,9 @@ def _run_roboduet_alignment_check(env, agent_cfg) -> None:
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
-def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+def main(  # noqa: C901 - training setup intentionally mirrors the upstream single-entry script.
+    env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg
+):
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
@@ -668,7 +675,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
             raise ValueError("--roboduet_stage2_dog_checkpoint cannot be combined with --resume or Distillation.")
         if args_cli.roboduet_probe_dog_checkpoint is not None:
-            raise ValueError("--roboduet_stage2_dog_checkpoint cannot be combined with --roboduet_probe_dog_checkpoint.")
+            raise ValueError(
+                "--roboduet_stage2_dog_checkpoint cannot be combined with --roboduet_probe_dog_checkpoint."
+            )
         if agent_cfg.class_name != roboduet_runner_class_name:
             raise ValueError("--roboduet_stage2_dog_checkpoint is only valid for RoboDuetAutomaticRunner.")
         if not hasattr(agent_cfg, "roboduet_stage_switch_iteration"):
@@ -690,7 +699,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not hasattr(agent_cfg, "symmetry"):
             raise ValueError("--symmetry requires a RoboDuet runner config with symmetry fields.")
         agent_cfg.symmetry = True
-        symmetry_loss_coef = float(getattr(env_cfg, "roboduet_symmetry_loss_coef", getattr(agent_cfg, "symmetry_loss_coef", 1.0)))
+        symmetry_loss_coef = float(
+            getattr(env_cfg, "roboduet_symmetry_loss_coef", getattr(agent_cfg, "symmetry_loss_coef", 1.0))
+        )
         if hasattr(agent_cfg, "symmetry_loss_coef"):
             agent_cfg.symmetry_loss_coef = symmetry_loss_coef
         if hasattr(agent_cfg, "symmetry_loss_coef"):

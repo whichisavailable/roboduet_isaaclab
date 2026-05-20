@@ -1,3 +1,6 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import importlib
@@ -38,7 +41,11 @@ def resolve_callable(name_or_callable: Any) -> Any:
     except (ImportError, ModuleNotFoundError):
         rsl_resolve_callable = None
 
-    resolved = rsl_resolve_callable(name_or_callable) if callable(rsl_resolve_callable) else _resolve_from_path(name_or_callable)
+    resolved = (
+        rsl_resolve_callable(name_or_callable)
+        if callable(rsl_resolve_callable)
+        else _resolve_from_path(name_or_callable)
+    )
     if not callable(resolved):
         raise TypeError(f"Resolved object for '{name_or_callable}' is not callable: {type(resolved)!r}.")
     return resolved

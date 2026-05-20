@@ -1,3 +1,6 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import torch
@@ -8,9 +11,7 @@ _DOG_PRIVILEGED_OBS_DIM = 2
 _ARM_POLICY_OBS_DIM = 20
 _ARM_PRIVILEGED_OBS_DIM = 9
 
-_LEG_SIGN = torch.tensor(
-    [-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0], dtype=torch.float32
-)
+_LEG_SIGN = torch.tensor([-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0], dtype=torch.float32)
 _ARM_SIGN = torch.tensor([-1.0, 1.0, 1.0, -1.0, 1.0, -1.0], dtype=torch.float32)
 _PLAN_SIGN = torch.tensor([1.0, -1.0], dtype=torch.float32)
 _FOOT_LEFT_RIGHT_INDEX = (1, 0, 3, 2)

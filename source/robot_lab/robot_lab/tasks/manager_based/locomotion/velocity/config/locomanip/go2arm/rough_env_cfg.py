@@ -1,3 +1,6 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from collections.abc import Callable
 from typing import cast
@@ -18,7 +21,6 @@ from robot_lab.tasks.manager_based.locomotion.velocity.cus_velocity_env_cfg impo
     GO2ARM_ARM_JOINT_NAMES,
     GO2ARM_BASE_BODY_NAME,
     GO2ARM_FOOT_BODY_NAMES,
-    GO2ARM_FOOT_SCANNER_NAMES,
     GO2ARM_LEG_JOINT_NAMES,
     GO2ARM_NON_FOOT_BODY_NAMES,
     Go2ArmDefaultDeltaJointPositionActionCfg,
@@ -275,7 +277,12 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
             gait_kappa=0.04,
             pretrained_reward_scales={
                 key: PRETRAINED_REWARD_SCALES[key]
-                for key in ("tracking_lin_vel", "tracking_ang_vel", "tracking_contacts_shaped_force", "tracking_contacts_shaped_vel")
+                for key in (
+                    "tracking_lin_vel",
+                    "tracking_ang_vel",
+                    "tracking_contacts_shaped_force",
+                    "tracking_contacts_shaped_vel",
+                )
             },
         )
 
@@ -351,7 +358,11 @@ class UnitreeGo2ArmRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.events.randomize_reset_joints.func = mdp.reset_joints_by_scale
         self.events.randomize_reset_joints.params["position_range"] = (0.5, 1.5)
         self.events.randomize_reset_joints.params["velocity_range"] = (0.0, 0.0)
-        self.events.randomize_reset_base.params["pose_range"] = {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "yaw": (-math.pi, math.pi)}
+        self.events.randomize_reset_base.params["pose_range"] = {
+            "x": (-0.2, 0.2),
+            "y": (-0.2, 0.2),
+            "yaw": (-math.pi, math.pi),
+        }
         self.events.randomize_reset_base.params["velocity_range"] = {
             "x": (-0.5, 0.5),
             "y": (-0.5, 0.5),

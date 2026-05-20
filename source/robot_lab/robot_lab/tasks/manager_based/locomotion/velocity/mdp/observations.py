@@ -932,10 +932,10 @@ def roboduet_current_lpy(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> tor
     delta_world = ee_pos_w - base_pos_w
     delta_yaw = quat_apply_inverse(yaw_quat, delta_world)
     delta_yaw[:, 2] = ee_pos_w[:, 2] - _ground_height_under_base(env) - 0.38
-    l = torch.linalg.norm(delta_yaw, dim=1)
+    arm_length = torch.linalg.norm(delta_yaw, dim=1)
     p = torch.atan2(delta_yaw[:, 2], torch.sqrt(torch.clamp(delta_yaw[:, 0] ** 2 + delta_yaw[:, 1] ** 2, min=1.0e-8)))
     yaw = torch.atan2(delta_yaw[:, 1], delta_yaw[:, 0])
-    return torch.stack((l, p, yaw), dim=-1)
+    return torch.stack((arm_length, p, yaw), dim=-1)
 
 
 def roboduet_current_ee_quat_in_base(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
