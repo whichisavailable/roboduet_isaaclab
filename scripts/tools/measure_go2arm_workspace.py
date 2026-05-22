@@ -39,7 +39,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Measure Go2Arm physical and reliable workspace expansion.")
     parser.add_argument("--mode", choices=("physical", "reliable", "both"), default="physical")
     parser.add_argument("--task", type=str, default="RobotLab-Isaac-Flat-Go2Arm-v0")
-    parser.add_argument("--num_envs", type=int, default=256, help="Parallel envs. Mainly speeds up reliable rollout.")
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=16,
+        help=(
+            "Parallel IsaacLab env clones inside one Isaac Sim process. "
+            "Higher values speed up reliable rollout but use more GPU memory."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--disable_fabric", action="store_true", default=False)
 
@@ -207,8 +215,8 @@ def _make_env(num_envs: int):
     return env
 
 
-def _make_agent_env(num_envs: int):
-    print(f"[INFO] Creating reliable rollout env: task={args_cli.task}, num_envs={num_envs}", flush=True)
+def _make_reliable_raw_env(num_envs: int):
+    print(f"[INFO] Creating reliable raw env: task={args_cli.task}, num_envs={num_envs}", flush=True)
     rsl_args = argparse.Namespace(
         seed=args_cli.seed,
         resume=False,
@@ -245,6 +253,12 @@ def _make_agent_env(num_envs: int):
         print("[INFO] Converting multi-agent env to single-agent env...", flush=True)
         env = multi_agent_to_single_agent(env)
         print("[INFO] Multi-agent conversion complete.", flush=True)
+    env.reset()
+    print("[INFO] Reliable raw env ready.", flush=True)
+    return env, agent_cfg, checkpoint_path
+
+
+def _wrap_reliable_env(env, agent_cfg, checkpoint_path: str):
     print("[INFO] Wrapping reliable env for RSL-RL...", flush=True)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     print("[INFO] Reliable env wrapper ready.", flush=True)
@@ -600,14 +614,22 @@ def _print_physical_results(results: dict[str, float]) -> None:
 def main() -> None:
     print(
         f"[INFO] Go2Arm workspace measurement starting: mode={args_cli.mode}, "
-        f"headless={getattr(args_cli, 'headless', False)}",
+        f"headless={getattr(args_cli, 'headless', False)}, "
+        f"num_envs={args_cli.num_envs} parallel clones in one Isaac Sim process",
         flush=True,
     )
     # Reliable mode also needs physical candidates, so all modes start with the
     # same FK/voxel pass.
-    physical_env = _make_env(args_cli.num_envs)
-    fixed_voxels, expanded_voxels, _ = compute_physical_workspace(physical_env)
-    physical_env.close()
+    reliable_raw_env = None
+    reliable_agent_cfg = None
+    reliable_checkpoint_path = None
+    if args_cli.mode in {"reliable", "both"}:
+        reliable_raw_env, reliable_agent_cfg, reliable_checkpoint_path = _make_reliable_raw_env(args_cli.num_envs)
+        fixed_voxels, expanded_voxels, _ = compute_physical_workspace(reliable_raw_env)
+    else:
+        physical_env = _make_env(args_cli.num_envs)
+        fixed_voxels, expanded_voxels, _ = compute_physical_workspace(physical_env)
+        physical_env.close()
 
     physical_fixed = _volume(fixed_voxels)
     physical_expanded = _volume(expanded_voxels)
@@ -622,7 +644,7 @@ def main() -> None:
     _print_physical_results(results)
 
     if args_cli.mode in {"reliable", "both"}:
-        reliable_env, policy = _make_agent_env(args_cli.num_envs)
+        reliable_env, policy = _wrap_reliable_env(reliable_raw_env, reliable_agent_cfg, reliable_checkpoint_path)
         reliable_fixed = _evaluate_reliable_volume(reliable_env, policy, fixed_voxels, physical_fixed, label="fixed")
         reliable_expanded = _evaluate_reliable_volume(
             reliable_env, policy, expanded_voxels, physical_expanded, label="expanded"
