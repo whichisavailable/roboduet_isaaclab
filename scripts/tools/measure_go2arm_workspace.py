@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from pathlib import Path
 from typing import Iterable
 
@@ -65,6 +67,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trials-per-target", type=int, default=10)
     parser.add_argument("--success-rate-threshold", type=float, default=0.89)
     parser.add_argument("--success-pos-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--reliable-max-steps",
+        type=int,
+        default=None,
+        help="Optional cap for reliable rollout steps per trial. Defaults to the environment timeout.",
+    )
+    parser.add_argument("--reliable-progress-interval-steps", type=int, default=250)
+    parser.add_argument(
+        "--reliable-env-cap",
+        type=int,
+        default=256,
+        help="Upper bound for reliable env clones. Prevents oversized vector envs on 24GB GPUs.",
+    )
 
     AppLauncher.add_app_launcher_args(parser)
     return parser
@@ -83,6 +98,7 @@ import gymnasium as gym  # noqa: E402
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner  # noqa: E402
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent  # noqa: E402
+from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab.utils.assets import retrieve_file_path  # noqa: E402
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
@@ -100,6 +116,29 @@ GO2ARM_EE_BODY_NAME = "link6"
 GO2ARM_MOUNT_OFFSET_B = (-0.01, 0.0, 0.085)
 GO2ARM_DEFAULT_BASE_HEIGHT = 0.34
 GO2ARM_DEFAULT_TRUNK_REF_HEIGHT = 0.38
+WORKSPACE_SUCCESS_TERM_NAME = "workspace_eval_success"
+
+
+def _workspace_success_termination(env, threshold: float, ee_body_name: str) -> torch.Tensor:
+    target_w = getattr(env, "_go2arm_workspace_eval_target_w", None)
+    active = getattr(env, "_go2arm_workspace_eval_active", None)
+    if target_w is None or active is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    robot = env.scene["robot"]
+    ee_id = robot.body_names.index(ee_body_name)
+    err = torch.linalg.norm(robot.data.body_pos_w[:, ee_id] - target_w, dim=1)
+    return active & (err <= float(threshold))
+
+
+def _enable_workspace_success_termination(env_cfg) -> None:
+    setattr(
+        env_cfg.terminations,
+        WORKSPACE_SUCCESS_TERM_NAME,
+        DoneTerm(
+            func=_workspace_success_termination,
+            params={"threshold": float(args_cli.success_pos_threshold), "ee_body_name": GO2ARM_EE_BODY_NAME},
+        ),
+    )
 
 
 def _go2arm_urdf_path() -> Path:
@@ -237,6 +276,7 @@ def _make_reliable_raw_env(num_envs: int):
         use_fabric=not args_cli.disable_fabric,
     )
     _configure_eval_env(env_cfg, agent_cfg, num_envs=num_envs)
+    _enable_workspace_success_termination(env_cfg)
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] Resolving Go2Arm checkpoint under: {log_root_path}", flush=True)
     checkpoint_path = _resolve_go2arm_checkpoint(log_root_path, agent_cfg)
@@ -535,14 +575,17 @@ def _evaluate_reliable_volume(
     trial_count = int(args_cli.trials_per_target)
     successes = torch.zeros(targets.shape[0], dtype=torch.int32, device=device)
     evaluated = torch.zeros(targets.shape[0], dtype=torch.int32, device=device)
-    threshold = float(args_cli.success_pos_threshold)
-
-    jobs = [(target_idx, trial_idx) for target_idx in range(targets.shape[0]) for trial_idx in range(trial_count)]
+    target_count = int(targets.shape[0])
+    required_successes = min(trial_count, max(1, int(float(args_cli.success_rate_threshold) * trial_count) + 1))
+    failure_limit = trial_count - required_successes + 1
     max_steps = int(env.unwrapped.max_episode_length)
+    if args_cli.reliable_max_steps is not None:
+        max_steps = min(max_steps, int(args_cli.reliable_max_steps))
     print(
         "[INFO] Starting reliable rollout pass: "
-        f"label={label}, targets={targets.shape[0]}, trials_per_target={trial_count}, "
-        f"total_trials={len(jobs)}, num_envs={num_envs}, max_steps={max_steps}, "
+        f"label={label}, targets={target_count}, trials_per_target={trial_count}, "
+        f"required_successes={required_successes}, failure_limit={failure_limit}, "
+        f"num_envs={num_envs}, max_steps={max_steps}, "
         f"success_pos_threshold={args_cli.success_pos_threshold}, "
         f"success_rate_threshold={args_cli.success_rate_threshold}",
         flush=True,
@@ -550,16 +593,24 @@ def _evaluate_reliable_volume(
 
     raw_env = env.unwrapped
     env_ids_all = torch.arange(num_envs, device=device, dtype=torch.long)
-    worker_env_count = min(num_envs, len(jobs))
+    worker_env_count = min(num_envs, target_count)
     worker_env_ids = env_ids_all[:worker_env_count]
     current_target_idx = torch.full((num_envs,), -1, dtype=torch.long, device=device)
     current_target_w = torch.zeros((num_envs, 3), dtype=torch.float32, device=device)
+    active_steps = torch.zeros(num_envs, dtype=torch.int32, device=device)
     active = torch.zeros(num_envs, dtype=torch.bool, device=device)
-    job_cursor = 0
-    completed = 0
+    pending_targets = deque(range(target_count))
+    decided = torch.zeros(target_count, dtype=torch.bool, device=device)
+    decided_count = 0
+    reliable_count = 0
+    evaluated_trials = 0
     global_steps = 0
-    next_progress = 1 if num_envs <= 4 else max(num_envs * 10, 1)
-    next_step_report = 250
+    next_progress = 1 if target_count <= 16 else max(target_count // 20, 1)
+    progress_interval_steps = max(int(args_cli.reliable_progress_interval_steps), 1)
+    next_step_report = progress_interval_steps
+    rollout_start_time = time.perf_counter()
+    raw_env._go2arm_workspace_eval_target_w = current_target_w
+    raw_env._go2arm_workspace_eval_active = active
 
     def _reset_policy(env_ids: torch.Tensor | None = None) -> None:
         if not hasattr(policy, "reset"):
@@ -574,92 +625,120 @@ def _evaluate_reliable_volume(
         except TypeError:
             policy.reset()
 
-    def _assign_jobs(env_ids: torch.Tensor, *, reset_envs: bool) -> None:
-        nonlocal job_cursor
-        if env_ids.numel() == 0 or job_cursor >= len(jobs):
+    def _assign_targets(env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0 or not pending_targets:
             return
-        assign_count = min(int(env_ids.numel()), len(jobs) - job_cursor)
+        assign_count = min(int(env_ids.numel()), len(pending_targets))
         assign_env_ids = env_ids[:assign_count]
-        if reset_envs:
-            raw_env.reset(env_ids=assign_env_ids)
-            _reset_policy(assign_env_ids)
-        target_indices = torch.tensor(
-            [jobs[job_cursor + offset][0] for offset in range(assign_count)], dtype=torch.long, device=device
-        )
+        target_indices = torch.tensor([pending_targets.popleft() for _ in range(assign_count)], dtype=torch.long, device=device)
         target_w = targets[target_indices.cpu()].to(device) + raw_env.scene.env_origins[assign_env_ids]
         current_target_idx[assign_env_ids] = target_indices
         current_target_w[assign_env_ids] = target_w
+        active_steps[assign_env_ids] = 0
         active[assign_env_ids] = True
         _set_fixed_targets(raw_env, target_w, assign_env_ids)
-        job_cursor += assign_count
 
     if worker_env_count < num_envs:
         print(
             f"[INFO] Reliable rollout ({label}) using {worker_env_count}/{num_envs} envs "
-            "because total_trials is smaller than num_envs.",
+            "because target count is smaller than num_envs.",
             flush=True,
         )
     print(f"[INFO] Reliable rollout ({label}) resetting env ids: count={worker_env_count}", flush=True)
     raw_env.reset(env_ids=worker_env_ids)
     print(f"[INFO] Reliable rollout ({label}) reset complete.", flush=True)
     _reset_policy()
-    print(f"[INFO] Reliable rollout ({label}) assigning initial jobs...", flush=True)
-    _assign_jobs(worker_env_ids, reset_envs=False)
-    print(f"[INFO] Reliable rollout ({label}) initial jobs assigned: active={int(active.sum().item())}", flush=True)
+    print(f"[INFO] Reliable rollout ({label}) assigning initial targets...", flush=True)
+    _assign_targets(worker_env_ids)
+    print(f"[INFO] Reliable rollout ({label}) initial targets assigned: active={int(active.sum().item())}", flush=True)
     obs = env.get_observations()
     print(f"[INFO] Reliable rollout ({label}) initial observations ready.", flush=True)
 
     with torch.inference_mode():
-        while completed < len(jobs):
+        while decided_count < target_count:
             if not active.any():
                 idle_env_ids = worker_env_ids[~active[worker_env_ids]]
-                _assign_jobs(idle_env_ids, reset_envs=True)
+                _assign_targets(idle_env_ids)
                 obs = env.get_observations()
                 if not active.any():
                     break
 
+            if global_steps == 0:
+                print(f"[INFO] Reliable rollout ({label}) first policy inference starting...", flush=True)
             actions = policy.act_inference(obs) if hasattr(policy, "act_inference") else policy(obs)
+            if global_steps == 0:
+                print(f"[INFO] Reliable rollout ({label}) first env.step starting...", flush=True)
             obs, _, dones, _ = env.step(actions)
             global_steps += 1
+            if global_steps == 1:
+                print(f"[INFO] Reliable rollout ({label}) first env.step complete.", flush=True)
 
             active_env_ids = env_ids_all[active]
-            ee_pos = _current_ee_pos_w(raw_env, active_env_ids)
-            err = torch.linalg.norm(ee_pos - current_target_w[active_env_ids], dim=1)
-            reached_local = err <= threshold
+            active_steps[active_env_ids] += 1
+            success_term = raw_env.termination_manager.get_term(WORKSPACE_SUCCESS_TERM_NAME)[active_env_ids]
+            timeout_local = active_steps[active_env_ids] >= max_steps
             done_local = dones[active_env_ids].to(torch.bool)
-            finished_local = reached_local | done_local
+            finished_local = success_term | timeout_local | done_local
 
             if finished_local.any():
                 finished_env_ids = active_env_ids[finished_local]
                 finished_targets = current_target_idx[finished_env_ids]
-                success_values = reached_local[finished_local].to(torch.int32)
+                success_values = success_term[finished_local].to(torch.int32)
+                manual_timeout_env_ids = active_env_ids[timeout_local & ~(success_term | done_local)]
+                if manual_timeout_env_ids.numel() > 0:
+                    raw_env.reset(env_ids=manual_timeout_env_ids)
                 one = torch.ones_like(success_values, dtype=torch.int32)
                 evaluated.index_add_(0, finished_targets, one)
                 successes.index_add_(0, finished_targets, success_values)
+                evaluated_trials += int(finished_env_ids.numel())
+
+                target_successes = successes[finished_targets]
+                target_evaluated = evaluated[finished_targets]
+                target_failures = target_evaluated - target_successes
+                target_done = (target_successes >= required_successes) | (target_failures >= failure_limit) | (
+                    target_evaluated >= trial_count
+                )
+                if target_done.any():
+                    done_targets = finished_targets[target_done]
+                    newly_decided = done_targets[~decided[done_targets]]
+                    if newly_decided.numel() > 0:
+                        decided[newly_decided] = True
+                        decided_count += int(newly_decided.numel())
+                        reliable_count += int((successes[newly_decided] >= required_successes).sum().item())
+                retry_targets = finished_targets[~target_done].detach().cpu().tolist()
+                pending_targets.extend(int(target_i) for target_i in retry_targets)
+
                 active[finished_env_ids] = False
                 current_target_idx[finished_env_ids] = -1
-                completed += int(finished_env_ids.numel())
+                active_steps[finished_env_ids] = 0
+                raw_env._go2arm_workspace_eval_active[finished_env_ids] = False
 
-                _assign_jobs(finished_env_ids, reset_envs=True)
+                _reset_policy(finished_env_ids)
+                _assign_targets(finished_env_ids)
                 obs = env.get_observations()
 
-            if completed >= next_progress or completed == len(jobs):
+            if decided_count >= next_progress or decided_count == target_count:
+                elapsed = max(time.perf_counter() - rollout_start_time, 1.0e-9)
                 print(
-                    f"[INFO] Reliable rollout ({label}): {completed}/{len(jobs)} trials, "
-                    f"active={int(active.sum().item())}, sim_steps={global_steps}",
+                    f"[INFO] Reliable rollout ({label}): decided={decided_count}/{target_count}, "
+                    f"reliable={reliable_count}, trials={evaluated_trials}, active={int(active.sum().item())}, "
+                    f"pending={len(pending_targets)}, sim_steps={global_steps}, "
+                    f"steps_per_s={global_steps / elapsed:.2f}",
                     flush=True,
                 )
-                next_progress = completed + (1 if num_envs <= 4 else max(num_envs * 10, 1))
+                next_progress = decided_count + (1 if target_count <= 16 else max(target_count // 20, 1))
             elif global_steps >= next_step_report:
+                elapsed = max(time.perf_counter() - rollout_start_time, 1.0e-9)
                 print(
-                    f"[INFO] Reliable rollout ({label}) heartbeat: {completed}/{len(jobs)} trials, "
-                    f"active={int(active.sum().item())}, sim_steps={global_steps}",
+                    f"[INFO] Reliable rollout ({label}) heartbeat: decided={decided_count}/{target_count}, "
+                    f"reliable={reliable_count}, trials={evaluated_trials}, active={int(active.sum().item())}, "
+                    f"pending={len(pending_targets)}, sim_steps={global_steps}, "
+                    f"steps_per_s={global_steps / elapsed:.2f}",
                     flush=True,
                 )
-                next_step_report += 250
+                next_step_report += progress_interval_steps
 
-    success_rate = successes.to(torch.float32) / torch.clamp(evaluated.to(torch.float32), min=1.0)
-    reliable_fraction = torch.mean((success_rate > float(args_cli.success_rate_threshold)).to(torch.float32)).item()
+    reliable_fraction = float(reliable_count) / float(max(target_count, 1))
     return float(reliable_fraction) * float(physical_volume)
 
 
@@ -701,7 +780,17 @@ def main() -> None:
     reliable_agent_cfg = None
     reliable_checkpoint_path = None
     if args_cli.mode in {"reliable", "both"}:
-        reliable_raw_env, reliable_agent_cfg, reliable_checkpoint_path = _make_reliable_raw_env(args_cli.num_envs)
+        reliable_num_envs = min(int(args_cli.num_envs), max(int(args_cli.reliable_env_cap), 1))
+        if int(args_cli.reliable_max_targets) > 0:
+            reliable_num_envs = min(reliable_num_envs, int(args_cli.reliable_max_targets))
+        reliable_num_envs = max(reliable_num_envs, 1)
+        if reliable_num_envs != int(args_cli.num_envs):
+            print(
+                f"[INFO] Capping reliable env clones: requested={args_cli.num_envs}, using={reliable_num_envs}. "
+                f"cap={args_cli.reliable_env_cap}, reliable_max_targets={args_cli.reliable_max_targets}",
+                flush=True,
+            )
+        reliable_raw_env, reliable_agent_cfg, reliable_checkpoint_path = _make_reliable_raw_env(reliable_num_envs)
         fixed_voxels, expanded_voxels, _ = compute_physical_workspace(reliable_raw_env)
     else:
         physical_env = _make_env(args_cli.num_envs)
