@@ -550,6 +550,8 @@ def _evaluate_reliable_volume(
 
     raw_env = env.unwrapped
     env_ids_all = torch.arange(num_envs, device=device, dtype=torch.long)
+    worker_env_count = min(num_envs, len(jobs))
+    worker_env_ids = env_ids_all[:worker_env_count]
     current_target_idx = torch.full((num_envs,), -1, dtype=torch.long, device=device)
     current_target_w = torch.zeros((num_envs, 3), dtype=torch.float32, device=device)
     active = torch.zeros(num_envs, dtype=torch.bool, device=device)
@@ -591,12 +593,18 @@ def _evaluate_reliable_volume(
         _set_fixed_targets(raw_env, target_w, assign_env_ids)
         job_cursor += assign_count
 
-    print(f"[INFO] Reliable rollout ({label}) resetting env ids: count={num_envs}", flush=True)
-    raw_env.reset(env_ids=env_ids_all)
+    if worker_env_count < num_envs:
+        print(
+            f"[INFO] Reliable rollout ({label}) using {worker_env_count}/{num_envs} envs "
+            "because total_trials is smaller than num_envs.",
+            flush=True,
+        )
+    print(f"[INFO] Reliable rollout ({label}) resetting env ids: count={worker_env_count}", flush=True)
+    raw_env.reset(env_ids=worker_env_ids)
     print(f"[INFO] Reliable rollout ({label}) reset complete.", flush=True)
     _reset_policy()
     print(f"[INFO] Reliable rollout ({label}) assigning initial jobs...", flush=True)
-    _assign_jobs(env_ids_all, reset_envs=False)
+    _assign_jobs(worker_env_ids, reset_envs=False)
     print(f"[INFO] Reliable rollout ({label}) initial jobs assigned: active={int(active.sum().item())}", flush=True)
     obs = env.get_observations()
     print(f"[INFO] Reliable rollout ({label}) initial observations ready.", flush=True)
@@ -604,7 +612,7 @@ def _evaluate_reliable_volume(
     with torch.inference_mode():
         while completed < len(jobs):
             if not active.any():
-                idle_env_ids = env_ids_all[~active]
+                idle_env_ids = worker_env_ids[~active[worker_env_ids]]
                 _assign_jobs(idle_env_ids, reset_envs=True)
                 obs = env.get_observations()
                 if not active.any():
