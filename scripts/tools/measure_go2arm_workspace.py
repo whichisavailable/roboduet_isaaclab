@@ -191,6 +191,7 @@ def _configure_eval_env(env_cfg, agent_cfg=None, *, num_envs: int) -> None:
 
 
 def _make_env(num_envs: int):
+    print(f"[INFO] Creating physical FK env: task={args_cli.task}, num_envs={num_envs}", flush=True)
     env_cfg = parse_env_cfg(
         args_cli.task,
         device=args_cli.device,
@@ -202,10 +203,12 @@ def _make_env(num_envs: int):
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
     env.reset()
+    print("[INFO] Physical FK env ready.", flush=True)
     return env
 
 
 def _make_agent_env(num_envs: int):
+    print(f"[INFO] Creating reliable rollout env: task={args_cli.task}, num_envs={num_envs}", flush=True)
     rsl_args = argparse.Namespace(
         seed=args_cli.seed,
         resume=False,
@@ -227,6 +230,7 @@ def _make_agent_env(num_envs: int):
     )
     _configure_eval_env(env_cfg, agent_cfg, num_envs=num_envs)
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    print(f"[INFO] Resolving Go2Arm checkpoint under: {log_root_path}", flush=True)
     checkpoint_path = _resolve_go2arm_checkpoint(log_root_path, agent_cfg)
     log_dir = os.path.dirname(checkpoint_path)
     if os.path.basename(log_dir) in {"checkpoints_dog", "checkpoints_arm"}:
@@ -245,9 +249,10 @@ def _make_agent_env(num_envs: int):
     else:
         runner_class = resolve_callable(agent_cfg.class_name)
         runner = runner_class(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    print(f"[INFO] Loading Go2Arm checkpoint: {checkpoint_path}")
+    print(f"[INFO] Loading Go2Arm checkpoint: {checkpoint_path}", flush=True)
     runner.load(checkpoint_path)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
+    print("[INFO] Reliable rollout env and policy ready.", flush=True)
     return env, policy
 
 
@@ -320,6 +325,10 @@ def _collect_mount_local_points(env, num_samples: int) -> torch.Tensor:
         raise ValueError(f"--fk-batch-size ({batch_size}) cannot exceed env num_envs ({num_envs}).")
 
     limits = _read_arm_joint_limits()
+    print(
+        f"[INFO] Sampling arm FK points: samples={num_samples}, batch_size={batch_size}, device={device}",
+        flush=True,
+    )
     sampled_arm_q = _sample_arm_joint_positions(num_samples, limits, device)
     arm_ids = _arm_joint_ids(robot)
     ee_id = _ee_body_id(robot)
@@ -351,7 +360,7 @@ def _collect_mount_local_points(env, num_samples: int) -> torch.Tensor:
             ee_pos_mount = quat_apply_inverse(root_quat_w, ee_pos_w - mount_pos_w)
             all_points.append(ee_pos_mount.detach().clone())
             if start == 0 or end == num_samples or (start // batch_size) % 25 == 0:
-                print(f"[INFO] FK samples: {end}/{num_samples}")
+                print(f"[INFO] FK samples: {end}/{num_samples}", flush=True)
 
     return torch.cat(all_points, dim=0)
 
@@ -402,12 +411,19 @@ def _transform_mount_points(mount_points: torch.Tensor, roll: float, pitch: floa
 
 
 def compute_physical_workspace(env) -> tuple[set[tuple[int, int, int]], set[tuple[int, int, int]], torch.Tensor]:
+    print(
+        "[INFO] Starting physical workspace pass: "
+        f"num_arm_samples={args_cli.num_arm_samples}, base_grid={args_cli.base_grid}, "
+        f"voxel_size={args_cli.voxel_size}",
+        flush=True,
+    )
     mount_points = _collect_mount_local_points(env, int(args_cli.num_arm_samples))
     device = env.unwrapped.device
     voxel_size = float(args_cli.voxel_size)
 
     fixed_points = _transform_mount_points(mount_points, 0.0, 0.0, device=device)
     fixed_voxels = _voxelize_points(fixed_points, voxel_size)
+    print(f"[INFO] Fixed mount voxelization complete: voxels={len(fixed_voxels)}", flush=True)
     expanded_voxels: set[tuple[int, int, int]] = set()
 
     rolls = _roll_pitch_values(args_cli.base_grid, args_cli.roll_range, device=device)
@@ -421,7 +437,8 @@ def compute_physical_workspace(env) -> tuple[set[tuple[int, int, int]], set[tupl
                 _update_voxel_set(expanded_voxels, transformed, voxel_size)
                 done += 1
                 if done == 1 or done == total or done % 100 == 0:
-                    print(f"[INFO] Roll/pitch grid voxelization: {done}/{total}")
+                    print(f"[INFO] Roll/pitch grid voxelization: {done}/{total}", flush=True)
+    print(f"[INFO] Expanded voxelization complete: voxels={len(expanded_voxels)}", flush=True)
     return fixed_voxels, expanded_voxels, mount_points
 
 
@@ -494,6 +511,14 @@ def _evaluate_reliable_volume(
 
     jobs = [(target_idx, trial_idx) for target_idx in range(targets.shape[0]) for trial_idx in range(trial_count)]
     max_steps = int(env.unwrapped.max_episode_length)
+    print(
+        "[INFO] Starting reliable rollout pass: "
+        f"label={label}, targets={targets.shape[0]}, trials_per_target={trial_count}, "
+        f"total_trials={len(jobs)}, num_envs={num_envs}, max_steps={max_steps}, "
+        f"success_pos_threshold={args_cli.success_pos_threshold}, "
+        f"success_rate_threshold={args_cli.success_rate_threshold}",
+        flush=True,
+    )
 
     for start in range(0, len(jobs), num_envs):
         batch_jobs = jobs[start : start + num_envs]
@@ -531,7 +556,7 @@ def _evaluate_reliable_volume(
 
         completed = min(start + len(batch_jobs), len(jobs))
         if completed == len(jobs) or completed % max(num_envs * 10, 1) == 0:
-            print(f"[INFO] Reliable rollout ({label}): {completed}/{len(jobs)} trials")
+            print(f"[INFO] Reliable rollout ({label}): {completed}/{len(jobs)} trials", flush=True)
 
     success_rate = successes.to(torch.float32) / torch.clamp(evaluated.to(torch.float32), min=1.0)
     reliable_fraction = torch.mean((success_rate > float(args_cli.success_rate_threshold)).to(torch.float32)).item()
@@ -547,13 +572,18 @@ def _print_results(results: dict[str, float]) -> None:
         "reliable_expanded_volume_m3",
         "reliable_gain_percent",
     )
-    print("[GO2ARM WORKSPACE RESULTS]")
+    print("[GO2ARM WORKSPACE RESULTS]", flush=True)
     for key in ordered_keys:
         value = results.get(key, float("nan"))
-        print(f"{key}: {value:.9g}")
+        print(f"{key}: {value:.9g}", flush=True)
 
 
 def main() -> None:
+    print(
+        f"[INFO] Go2Arm workspace measurement starting: mode={args_cli.mode}, "
+        f"headless={getattr(args_cli, 'headless', False)}",
+        flush=True,
+    )
     # Reliable mode also needs physical candidates, so all modes start with the
     # same FK/voxel pass.
     physical_env = _make_env(args_cli.num_envs)
