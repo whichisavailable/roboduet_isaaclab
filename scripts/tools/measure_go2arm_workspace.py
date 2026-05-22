@@ -557,6 +557,7 @@ def _evaluate_reliable_volume(
     completed = 0
     global_steps = 0
     next_progress = 1 if num_envs <= 4 else max(num_envs * 10, 1)
+    next_step_report = 250
 
     def _reset_policy(env_ids: torch.Tensor | None = None) -> None:
         if not hasattr(policy, "reset"):
@@ -636,6 +637,13 @@ def _evaluate_reliable_volume(
                     flush=True,
                 )
                 next_progress = completed + (1 if num_envs <= 4 else max(num_envs * 10, 1))
+            elif global_steps >= next_step_report:
+                print(
+                    f"[INFO] Reliable rollout ({label}) heartbeat: {completed}/{len(jobs)} trials, "
+                    f"active={int(active.sum().item())}, sim_steps={global_steps}",
+                    flush=True,
+                )
+                next_step_report += 250
 
     success_rate = successes.to(torch.float32) / torch.clamp(evaluated.to(torch.float32), min=1.0)
     reliable_fraction = torch.mean((success_rate > float(args_cli.success_rate_threshold)).to(torch.float32)).item()
