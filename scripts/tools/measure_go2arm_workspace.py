@@ -591,10 +591,15 @@ def _evaluate_reliable_volume(
         _set_fixed_targets(raw_env, target_w, assign_env_ids)
         job_cursor += assign_count
 
-    obs, _ = env.reset()
+    print(f"[INFO] Reliable rollout ({label}) resetting env ids: count={num_envs}", flush=True)
+    raw_env.reset(env_ids=env_ids_all)
+    print(f"[INFO] Reliable rollout ({label}) reset complete.", flush=True)
     _reset_policy()
+    print(f"[INFO] Reliable rollout ({label}) assigning initial jobs...", flush=True)
     _assign_jobs(env_ids_all, reset_envs=False)
+    print(f"[INFO] Reliable rollout ({label}) initial jobs assigned: active={int(active.sum().item())}", flush=True)
     obs = env.get_observations()
+    print(f"[INFO] Reliable rollout ({label}) initial observations ready.", flush=True)
 
     with torch.inference_mode():
         while completed < len(jobs):
