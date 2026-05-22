@@ -473,9 +473,12 @@ def _gain(expanded: float, fixed: float) -> float:
     return 0.0 if fixed <= 0.0 else (expanded - fixed) / fixed * 100.0
 
 
-def _world_targets_to_lpy(raw_env, target_w: torch.Tensor) -> torch.Tensor:
+def _world_targets_to_lpy(raw_env, target_w: torch.Tensor, env_ids: torch.Tensor | None = None) -> torch.Tensor:
     robot = raw_env.scene["robot"]
-    base_pos = robot.data.root_pos_w[: target_w.shape[0]]
+    if env_ids is None:
+        base_pos = robot.data.root_pos_w[: target_w.shape[0]]
+    else:
+        base_pos = robot.data.root_pos_w[env_ids]
     yaw_zero_quat = quat_from_euler_xyz(
         torch.zeros(target_w.shape[0], device=target_w.device),
         torch.zeros(target_w.shape[0], device=target_w.device),
@@ -490,27 +493,29 @@ def _world_targets_to_lpy(raw_env, target_w: torch.Tensor) -> torch.Tensor:
     return torch.stack((length, pitch, yaw), dim=-1)
 
 
-def _set_fixed_targets(raw_env, target_w: torch.Tensor) -> None:
+def _set_fixed_targets(raw_env, target_w: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
     term = raw_env.command_manager.get_term("roboduet")
-    lpy = _world_targets_to_lpy(raw_env, target_w)
+    lpy = _world_targets_to_lpy(raw_env, target_w, env_ids)
     n = target_w.shape[0]
+    if env_ids is None:
+        env_ids = torch.arange(n, device=target_w.device)
     term.switch_open = True
-    term.commands_dog[:n] = 0.0
-    term.commands_arm[:n] = lpy
-    term.commands_arm_obs[:n] = 0.0
-    term.commands_arm_obs[:n, :3] = lpy
-    term.target_abg[:n] = 0.0
-    term.obj_quats[:n] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=target_w.device).expand(n, -1)
-    term.T_trajs[:n] = float("inf")
-    term.arm_time[:n] = 0.0
+    term.commands_dog[env_ids] = 0.0
+    term.commands_arm[env_ids] = lpy
+    term.commands_arm_obs[env_ids] = 0.0
+    term.commands_arm_obs[env_ids, :3] = lpy
+    term.target_abg[env_ids] = 0.0
+    term.obj_quats[env_ids] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=target_w.device).expand(n, -1)
+    term.T_trajs[env_ids] = float("inf")
+    term.arm_time[env_ids] = 0.0
     if hasattr(term, "_refresh_command_buffer"):
         term._refresh_command_buffer()
 
 
-def _current_ee_pos_w(raw_env, n: int) -> torch.Tensor:
+def _current_ee_pos_w(raw_env, env_ids: torch.Tensor) -> torch.Tensor:
     robot = raw_env.scene["robot"]
     ee_id = robot.body_names.index(GO2ARM_EE_BODY_NAME)
-    return robot.data.body_pos_w[:n, ee_id]
+    return robot.data.body_pos_w[env_ids, ee_id]
 
 
 def _evaluate_reliable_volume(
@@ -528,8 +533,8 @@ def _evaluate_reliable_volume(
     num_envs = env.unwrapped.num_envs
     device = env.unwrapped.device
     trial_count = int(args_cli.trials_per_target)
-    successes = torch.zeros(targets.shape[0], dtype=torch.int32)
-    evaluated = torch.zeros(targets.shape[0], dtype=torch.int32)
+    successes = torch.zeros(targets.shape[0], dtype=torch.int32, device=device)
+    evaluated = torch.zeros(targets.shape[0], dtype=torch.int32, device=device)
     threshold = float(args_cli.success_pos_threshold)
 
     jobs = [(target_idx, trial_idx) for target_idx in range(targets.shape[0]) for trial_idx in range(trial_count)]
@@ -543,43 +548,94 @@ def _evaluate_reliable_volume(
         flush=True,
     )
 
-    for start in range(0, len(jobs), num_envs):
-        batch_jobs = jobs[start : start + num_envs]
-        n = len(batch_jobs)
-        batch_target_indices = torch.tensor([job[0] for job in batch_jobs], dtype=torch.long)
-        env_targets_rel = targets[batch_target_indices].to(device)
+    raw_env = env.unwrapped
+    env_ids_all = torch.arange(num_envs, device=device, dtype=torch.long)
+    current_target_idx = torch.full((num_envs,), -1, dtype=torch.long, device=device)
+    current_target_w = torch.zeros((num_envs, 3), dtype=torch.float32, device=device)
+    active = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    job_cursor = 0
+    completed = 0
+    global_steps = 0
+    next_progress = 1 if num_envs <= 4 else max(num_envs * 10, 1)
 
-        obs, _ = env.reset()
-        raw_env = env.unwrapped
-        env_targets_w = env_targets_rel + raw_env.scene.env_origins[:n]
-        _set_fixed_targets(raw_env, env_targets_w)
-        obs = env.get_observations()
-
-        reached = torch.zeros(n, dtype=torch.bool, device=device)
-        active = torch.ones(n, dtype=torch.bool, device=device)
-        if hasattr(policy, "reset"):
+    def _reset_policy(env_ids: torch.Tensor | None = None) -> None:
+        if not hasattr(policy, "reset"):
+            return
+        if env_ids is None:
+            policy.reset()
+            return
+        dones_mask = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        dones_mask[env_ids] = True
+        try:
+            policy.reset(dones_mask)
+        except TypeError:
             policy.reset()
 
-        with torch.inference_mode():
-            for _ in range(max_steps):
-                actions = policy.act_inference(obs) if hasattr(policy, "act_inference") else policy(obs)
-                obs, _, dones, _ = env.step(actions)
-                ee_pos = _current_ee_pos_w(raw_env, n)
-                err = torch.linalg.norm(ee_pos - env_targets_w, dim=1)
-                reached |= active & (err <= threshold)
-                active &= ~dones[:n].to(torch.bool)
+    def _assign_jobs(env_ids: torch.Tensor, *, reset_envs: bool) -> None:
+        nonlocal job_cursor
+        if env_ids.numel() == 0 or job_cursor >= len(jobs):
+            return
+        assign_count = min(int(env_ids.numel()), len(jobs) - job_cursor)
+        assign_env_ids = env_ids[:assign_count]
+        if reset_envs:
+            raw_env.reset(env_ids=assign_env_ids)
+            _reset_policy(assign_env_ids)
+        target_indices = torch.tensor(
+            [jobs[job_cursor + offset][0] for offset in range(assign_count)], dtype=torch.long, device=device
+        )
+        target_w = targets[target_indices.cpu()].to(device) + raw_env.scene.env_origins[assign_env_ids]
+        current_target_idx[assign_env_ids] = target_indices
+        current_target_w[assign_env_ids] = target_w
+        active[assign_env_ids] = True
+        _set_fixed_targets(raw_env, target_w, assign_env_ids)
+        job_cursor += assign_count
+
+    obs, _ = env.reset()
+    _reset_policy()
+    _assign_jobs(env_ids_all, reset_envs=False)
+    obs = env.get_observations()
+
+    with torch.inference_mode():
+        while completed < len(jobs):
+            if not active.any():
+                idle_env_ids = env_ids_all[~active]
+                _assign_jobs(idle_env_ids, reset_envs=True)
+                obs = env.get_observations()
                 if not active.any():
                     break
 
-        reached_cpu = reached.detach().cpu()
-        for local_i, ok in enumerate(reached_cpu.tolist()):
-            target_i = int(batch_target_indices[local_i])
-            evaluated[target_i] += 1
-            successes[target_i] += int(ok)
+            actions = policy.act_inference(obs) if hasattr(policy, "act_inference") else policy(obs)
+            obs, _, dones, _ = env.step(actions)
+            global_steps += 1
 
-        completed = min(start + len(batch_jobs), len(jobs))
-        if completed == len(jobs) or completed % max(num_envs * 10, 1) == 0:
-            print(f"[INFO] Reliable rollout ({label}): {completed}/{len(jobs)} trials", flush=True)
+            active_env_ids = env_ids_all[active]
+            ee_pos = _current_ee_pos_w(raw_env, active_env_ids)
+            err = torch.linalg.norm(ee_pos - current_target_w[active_env_ids], dim=1)
+            reached_local = err <= threshold
+            done_local = dones[active_env_ids].to(torch.bool)
+            finished_local = reached_local | done_local
+
+            if finished_local.any():
+                finished_env_ids = active_env_ids[finished_local]
+                finished_targets = current_target_idx[finished_env_ids]
+                success_values = reached_local[finished_local].to(torch.int32)
+                one = torch.ones_like(success_values, dtype=torch.int32)
+                evaluated.index_add_(0, finished_targets, one)
+                successes.index_add_(0, finished_targets, success_values)
+                active[finished_env_ids] = False
+                current_target_idx[finished_env_ids] = -1
+                completed += int(finished_env_ids.numel())
+
+                _assign_jobs(finished_env_ids, reset_envs=True)
+                obs = env.get_observations()
+
+            if completed >= next_progress or completed == len(jobs):
+                print(
+                    f"[INFO] Reliable rollout ({label}): {completed}/{len(jobs)} trials, "
+                    f"active={int(active.sum().item())}, sim_steps={global_steps}",
+                    flush=True,
+                )
+                next_progress = completed + (1 if num_envs <= 4 else max(num_envs * 10, 1))
 
     success_rate = successes.to(torch.float32) / torch.clamp(evaluated.to(torch.float32), min=1.0)
     reliable_fraction = torch.mean((success_rate > float(args_cli.success_rate_threshold)).to(torch.float32)).item()
