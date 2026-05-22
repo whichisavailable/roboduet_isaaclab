@@ -232,16 +232,24 @@ def _make_agent_env(num_envs: int):
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] Resolving Go2Arm checkpoint under: {log_root_path}", flush=True)
     checkpoint_path = _resolve_go2arm_checkpoint(log_root_path, agent_cfg)
+    print(f"[INFO] Resolved runner checkpoint: {checkpoint_path}", flush=True)
     log_dir = os.path.dirname(checkpoint_path)
     if os.path.basename(log_dir) in {"checkpoints_dog", "checkpoints_arm"}:
         log_dir = os.path.dirname(log_dir)
     env_cfg.log_dir = log_dir
 
+    print("[INFO] Instantiating reliable gym env...", flush=True)
     env = gym.make(args_cli.task, cfg=env_cfg)
+    print("[INFO] Reliable gym env instantiated.", flush=True)
     if isinstance(env.unwrapped, DirectMARLEnv):
+        print("[INFO] Converting multi-agent env to single-agent env...", flush=True)
         env = multi_agent_to_single_agent(env)
+        print("[INFO] Multi-agent conversion complete.", flush=True)
+    print("[INFO] Wrapping reliable env for RSL-RL...", flush=True)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    print("[INFO] Reliable env wrapper ready.", flush=True)
 
+    print(f"[INFO] Creating runner: class_name={agent_cfg.class_name}", flush=True)
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
@@ -249,6 +257,7 @@ def _make_agent_env(num_envs: int):
     else:
         runner_class = resolve_callable(agent_cfg.class_name)
         runner = runner_class(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    print("[INFO] Runner created.", flush=True)
     print(f"[INFO] Loading Go2Arm checkpoint: {checkpoint_path}", flush=True)
     runner.load(checkpoint_path)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -578,6 +587,16 @@ def _print_results(results: dict[str, float]) -> None:
         print(f"{key}: {value:.9g}", flush=True)
 
 
+def _print_physical_results(results: dict[str, float]) -> None:
+    print("[GO2ARM PHYSICAL WORKSPACE RESULTS]", flush=True)
+    for key in (
+        "physical_fixed_mount_volume_m3",
+        "physical_expanded_volume_m3",
+        "physical_gain_percent",
+    ):
+        print(f"{key}: {results[key]:.9g}", flush=True)
+
+
 def main() -> None:
     print(
         f"[INFO] Go2Arm workspace measurement starting: mode={args_cli.mode}, "
@@ -600,6 +619,7 @@ def main() -> None:
         "reliable_expanded_volume_m3": float("nan"),
         "reliable_gain_percent": float("nan"),
     }
+    _print_physical_results(results)
 
     if args_cli.mode in {"reliable", "both"}:
         reliable_env, policy = _make_agent_env(args_cli.num_envs)
