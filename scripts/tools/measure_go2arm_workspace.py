@@ -23,13 +23,12 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import torch
 
 from isaaclab.app import AppLauncher
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RSL_RL_SCRIPT_DIR = REPO_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
@@ -116,22 +115,22 @@ simulation_app = app_launcher.app
 
 """Imports that require Isaac Sim to be launched."""
 
+import cli_args  # noqa: E402
 import gymnasium as gym  # noqa: E402
+import robot_lab.tasks  # noqa: F401,E402
+from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.callable_resolver import (  # noqa: E402
+    resolve_callable,
+)
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner  # noqa: E402
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent  # noqa: E402
 from isaaclab.managers import TerminationTermCfg as DoneTerm  # noqa: E402
 from isaaclab.utils.assets import retrieve_file_path  # noqa: E402
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz  # noqa: E402
+
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
+
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg  # noqa: E402
-
-import cli_args  # noqa: E402
-import robot_lab.tasks  # noqa: F401,E402
-from robot_lab.tasks.manager_based.locomotion.velocity.config.locomanip.go2arm.agents.callable_resolver import (  # noqa: E402
-    resolve_callable,
-)
-
 
 GO2ARM_ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 GO2ARM_EE_BODY_NAME = "link6"
@@ -516,8 +515,7 @@ def _reset_env_ids_with_progress(raw_env, env_ids: torch.Tensor, *, label: str, 
         return
 
     print(
-        f"[INFO] Reliable rollout ({label}) resetting env ids in chunks: "
-        f"count={total}, chunk_size={chunk_size}",
+        f"[INFO] Reliable rollout ({label}) resetting env ids in chunks: count={total}, chunk_size={chunk_size}",
         flush=True,
     )
     completed = 0
@@ -542,7 +540,13 @@ def _reset_env_ids_with_progress(raw_env, env_ids: torch.Tensor, *, label: str, 
     )
 
 
-def _transform_mount_points(mount_points: torch.Tensor, roll: float, pitch: float, *, device: torch.device) -> torch.Tensor:
+def _transform_mount_points(
+    mount_points: torch.Tensor,
+    roll: float,
+    pitch: float,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
     points = mount_points.to(device)
     n = points.shape[0]
     root_pos = torch.tensor((0.0, 0.0, GO2ARM_DEFAULT_BASE_HEIGHT), device=device).expand(n, -1)
@@ -713,7 +717,11 @@ def _evaluate_reliable_volume(
             return
         assign_count = min(int(env_ids.numel()), len(pending_targets))
         assign_env_ids = env_ids[:assign_count]
-        target_indices = torch.tensor([pending_targets.popleft() for _ in range(assign_count)], dtype=torch.long, device=device)
+        target_indices = torch.tensor(
+            [pending_targets.popleft() for _ in range(assign_count)],
+            dtype=torch.long,
+            device=device,
+        )
         target_w = targets[target_indices.cpu()].to(device) + raw_env.scene.env_origins[assign_env_ids]
         current_target_idx[assign_env_ids] = target_indices
         current_target_w[assign_env_ids] = target_w
@@ -786,8 +794,10 @@ def _evaluate_reliable_volume(
                 target_successes = successes[finished_targets]
                 target_evaluated = evaluated[finished_targets]
                 target_failures = target_evaluated - target_successes
-                target_done = (target_successes >= required_successes) | (target_failures >= failure_limit) | (
-                    target_evaluated >= trial_count
+                target_done = (
+                    (target_successes >= required_successes)
+                    | (target_failures >= failure_limit)
+                    | (target_evaluated >= trial_count)
                 )
                 if target_done.any():
                     done_targets = finished_targets[target_done]
@@ -913,7 +923,13 @@ def main() -> None:
                 flush=True,
             )
         else:
-            reliable_fixed = _evaluate_reliable_volume(reliable_env, policy, fixed_voxels, physical_fixed, label="fixed")
+            reliable_fixed = _evaluate_reliable_volume(
+                reliable_env,
+                policy,
+                fixed_voxels,
+                physical_fixed,
+                label="fixed",
+            )
         reliable_expanded = _evaluate_reliable_volume(
             reliable_env, policy, expanded_voxels, physical_expanded, label="expanded"
         )

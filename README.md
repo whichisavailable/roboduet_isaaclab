@@ -1,3 +1,5 @@
+**Workspace test result: `reliable_fixed_mount_volume_m3 = 0.42144`, `reliable_expanded_volume_m3 = 0.746752219`, `reliable_gain_percent = 77.1906366`.**
+
 ## Overview
 
 **roboduet_isaaclab** 是一个基于 `roboduet` (Isaacgym)的IsaacLab版本，目标是严格对齐 RoboDuet 原仓库`go2`的网络结构、观测、命令、奖励、随机化、终止、课程和两阶段训练流程。
