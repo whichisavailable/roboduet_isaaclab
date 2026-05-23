@@ -63,6 +63,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional dog/combined checkpoint path.")
     parser.add_argument("--experiment_name", type=str, default=None)
     parser.add_argument("--load_run", type=str, default=None)
+    parser.add_argument(
+        "--reliable-fixed-baseline",
+        choices=("rollout", "physical"),
+        default="rollout",
+        help=(
+            "How to define the fixed-mount reliable baseline. "
+            "'rollout' measures it with policy rollouts; "
+            "'physical' reuses the physical fixed-mount volume and skips the extra rollout."
+        ),
+    )
     parser.add_argument("--reliable-max-targets", type=int, default=2000)
     parser.add_argument("--trials-per-target", type=int, default=10)
     parser.add_argument("--success-rate-threshold", type=float, default=0.89)
@@ -74,6 +84,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional cap for reliable rollout steps per trial. Defaults to the environment timeout.",
     )
     parser.add_argument("--reliable-progress-interval-steps", type=int, default=250)
+    parser.add_argument(
+        "--reliable-progress-interval-seconds",
+        type=float,
+        default=10.0,
+        help="Time-based heartbeat interval for reliable rollouts, in seconds.",
+    )
+    parser.add_argument(
+        "--reliable-reset-chunk-size",
+        type=int,
+        default=32,
+        help="Reset reliable envs in chunks of this size so reset progress can be printed.",
+    )
     parser.add_argument(
         "--reliable-env-cap",
         type=int,
@@ -461,6 +483,65 @@ def _voxel_centers(voxels: set[tuple[int, int, int]], voxel_size: float, max_tar
     return centers
 
 
+def _format_progress_bar(done: int, total: int, *, width: int = 24) -> str:
+    total = max(int(total), 1)
+    done = max(0, min(int(done), total))
+    ratio = float(done) / float(total)
+    filled = min(width, max(0, int(ratio * width)))
+    if done > 0 and filled == 0:
+        filled = 1
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {done}/{total} ({ratio * 100.0:.1f}%)"
+
+
+def _reset_env_ids_with_progress(raw_env, env_ids: torch.Tensor, *, label: str, chunk_size: int) -> None:
+    total = int(env_ids.numel())
+    if total == 0:
+        return
+
+    chunk_size = int(chunk_size)
+    start_time = time.perf_counter()
+    if chunk_size <= 0 or total <= chunk_size:
+        print(
+            f"[INFO] Reliable rollout ({label}) resetting env ids: "
+            f"count={total}, chunk_size={chunk_size if chunk_size > 0 else 'single'}",
+            flush=True,
+        )
+        raw_env.reset(env_ids=env_ids)
+        elapsed = time.perf_counter() - start_time
+        print(
+            f"[INFO] Reliable rollout ({label}) reset complete: count={total}, elapsed={elapsed:.2f}s",
+            flush=True,
+        )
+        return
+
+    print(
+        f"[INFO] Reliable rollout ({label}) resetting env ids in chunks: "
+        f"count={total}, chunk_size={chunk_size}",
+        flush=True,
+    )
+    completed = 0
+    for start in range(0, total, chunk_size):
+        chunk = env_ids[start : start + chunk_size]
+        chunk_start = time.perf_counter()
+        raw_env.reset(env_ids=chunk)
+        completed += int(chunk.numel())
+        elapsed = max(time.perf_counter() - start_time, 1.0e-9)
+        chunk_elapsed = time.perf_counter() - chunk_start
+        print(
+            f"[INFO] Reliable rollout ({label}) reset progress: "
+            f"{_format_progress_bar(completed, total)}, "
+            f"elapsed={elapsed:.2f}s, last_chunk={chunk_elapsed:.2f}s, "
+            f"rate={completed / elapsed:.2f} envs/s",
+            flush=True,
+        )
+    total_elapsed = time.perf_counter() - start_time
+    print(
+        f"[INFO] Reliable rollout ({label}) reset complete: count={total}, elapsed={total_elapsed:.2f}s",
+        flush=True,
+    )
+
+
 def _transform_mount_points(mount_points: torch.Tensor, roll: float, pitch: float, *, device: torch.device) -> torch.Tensor:
     points = mount_points.to(device)
     n = points.shape[0]
@@ -607,7 +688,9 @@ def _evaluate_reliable_volume(
     global_steps = 0
     next_progress = 1 if target_count <= 16 else max(target_count // 20, 1)
     progress_interval_steps = max(int(args_cli.reliable_progress_interval_steps), 1)
+    progress_interval_seconds = max(float(args_cli.reliable_progress_interval_seconds), 0.1)
     next_step_report = progress_interval_steps
+    next_time_report = time.perf_counter() + progress_interval_seconds
     rollout_start_time = time.perf_counter()
     raw_env._go2arm_workspace_eval_target_w = current_target_w
     raw_env._go2arm_workspace_eval_active = active
@@ -644,9 +727,12 @@ def _evaluate_reliable_volume(
             "because target count is smaller than num_envs.",
             flush=True,
         )
-    print(f"[INFO] Reliable rollout ({label}) resetting env ids: count={worker_env_count}", flush=True)
-    raw_env.reset(env_ids=worker_env_ids)
-    print(f"[INFO] Reliable rollout ({label}) reset complete.", flush=True)
+    _reset_env_ids_with_progress(
+        raw_env,
+        worker_env_ids,
+        label=label,
+        chunk_size=int(args_cli.reliable_reset_chunk_size),
+    )
     _reset_policy()
     print(f"[INFO] Reliable rollout ({label}) assigning initial targets...", flush=True)
     _assign_targets(worker_env_ids)
@@ -686,7 +772,12 @@ def _evaluate_reliable_volume(
                 success_values = success_term[finished_local].to(torch.int32)
                 manual_timeout_env_ids = active_env_ids[timeout_local & ~(success_term | done_local)]
                 if manual_timeout_env_ids.numel() > 0:
-                    raw_env.reset(env_ids=manual_timeout_env_ids)
+                    _reset_env_ids_with_progress(
+                        raw_env,
+                        manual_timeout_env_ids,
+                        label=f"{label}/timeout",
+                        chunk_size=int(args_cli.reliable_reset_chunk_size),
+                    )
                 one = torch.ones_like(success_values, dtype=torch.int32)
                 evaluated.index_add_(0, finished_targets, one)
                 successes.index_add_(0, finished_targets, success_values)
@@ -717,20 +808,24 @@ def _evaluate_reliable_volume(
                 _assign_targets(finished_env_ids)
                 obs = env.get_observations()
 
-            if decided_count >= next_progress or decided_count == target_count:
+            now = time.perf_counter()
+            if decided_count >= next_progress or decided_count == target_count or now >= next_time_report:
                 elapsed = max(time.perf_counter() - rollout_start_time, 1.0e-9)
                 print(
-                    f"[INFO] Reliable rollout ({label}): decided={decided_count}/{target_count}, "
+                    f"[INFO] Reliable rollout ({label}) progress: "
+                    f"{_format_progress_bar(decided_count, target_count)}, "
                     f"reliable={reliable_count}, trials={evaluated_trials}, active={int(active.sum().item())}, "
                     f"pending={len(pending_targets)}, sim_steps={global_steps}, "
                     f"steps_per_s={global_steps / elapsed:.2f}",
                     flush=True,
                 )
                 next_progress = decided_count + (1 if target_count <= 16 else max(target_count // 20, 1))
+                next_time_report = now + progress_interval_seconds
             elif global_steps >= next_step_report:
                 elapsed = max(time.perf_counter() - rollout_start_time, 1.0e-9)
                 print(
-                    f"[INFO] Reliable rollout ({label}) heartbeat: decided={decided_count}/{target_count}, "
+                    f"[INFO] Reliable rollout ({label}) heartbeat: "
+                    f"{_format_progress_bar(decided_count, target_count)}, "
                     f"reliable={reliable_count}, trials={evaluated_trials}, active={int(active.sum().item())}, "
                     f"pending={len(pending_targets)}, sim_steps={global_steps}, "
                     f"steps_per_s={global_steps / elapsed:.2f}",
@@ -811,7 +906,14 @@ def main() -> None:
 
     if args_cli.mode in {"reliable", "both"}:
         reliable_env, policy = _wrap_reliable_env(reliable_raw_env, reliable_agent_cfg, reliable_checkpoint_path)
-        reliable_fixed = _evaluate_reliable_volume(reliable_env, policy, fixed_voxels, physical_fixed, label="fixed")
+        if args_cli.reliable_fixed_baseline == "physical":
+            reliable_fixed = physical_fixed
+            print(
+                "[INFO] Reliable fixed baseline set to physical workspace; skipping fixed rollout.",
+                flush=True,
+            )
+        else:
+            reliable_fixed = _evaluate_reliable_volume(reliable_env, policy, fixed_voxels, physical_fixed, label="fixed")
         reliable_expanded = _evaluate_reliable_volume(
             reliable_env, policy, expanded_voxels, physical_expanded, label="expanded"
         )
